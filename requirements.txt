@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+aiogram==3.*
+httpx
+SQLAlchemy
+alembic
+psycopg2-binary
+redis
+celery
+prometheus-client
+python-multipart
+jinja2
+pydantic-settings
+cryptography
+pynacl
+python-dotenv
