@@ -35,14 +35,14 @@ async def telegram_webhook(request: Request):
     await dp.feed_update(bot, update)
     return Response(status_code=200)
 
-# --- Admin: set webhook (склейка URL без двойных слэшей) ---
+# --- Admin: set webhook (СКЛЕЙКА БЕЗ ДВОЙНЫХ СЛЭШЕЙ) ---
 @app.post("/admin/set_webhook")
 async def set_webhook(req: Request):
     auth = req.headers.get("Authorization", "")
     if auth != f"Bearer {settings.ADMIN_TOKEN}":
         raise HTTPException(status_code=401, detail="unauthorized")
 
-    # Нормализация компонентов URL
+    # <<< ВАЖНО: нормализуем >>>
     base = str(settings.PUBLIC_BASE_URL).rstrip("/")
     path = settings.WEBHOOK_PATH.lstrip("/")
     url = f"{base}/{path}"
