@@ -40,7 +40,7 @@ async def supply(m: Message):
 @router.message(F.text == "Отчёты")
 async def reports(m: Message):
     url = url_join(str(settings.PUBLIC_BASE_URL), "/dashboard")
-    await m.answer(f"Сформируй отчёт в кабинете: {url}")
+    await m.answer(f"Сформируй отчёт в кабинете: {url}", disable_web_page_preview=True)
 
 @router.message(F.text == "Настройки")
 async def settings_menu(m: Message):
@@ -48,9 +48,11 @@ async def settings_menu(m: Message):
     ikb = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="Открыть кабинет", url=url)]]
     )
+    # ВНИМАНИЕ: URL не вставляем в текст, чтобы Telegram не делал превью
     await m.answer(
-        f"Зайди в кабинет: {url}\n(one-time ссылка, действует 10 минут)",
-        reply_markup=ikb
+        "Открой кабинет по кнопке ниже (one-time, 10 минут).",
+        reply_markup=ikb,
+        disable_web_page_preview=True
     )
 
 def build_bot():
