@@ -3,11 +3,18 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from app.core.config import settings
+from app.core.redis import redis
+import secrets
 
 router = Router()
 
 def url_join(base: str, path: str) -> str:
     return base.rstrip("/") + "/" + path.lstrip("/")
+
+async def build_login_url(tg_id: int) -> str:
+    token = secrets.token_urlsafe(32)
+    await redis.setex(f"login:ott:{token}", 600, str(tg_id))  # 10 минут
+    return url_join(str(settings.PUBLIC_BASE_URL), f"/login/tg?token={token}")
 
 @router.message(CommandStart())
 async def start(m: Message):
@@ -37,12 +44,12 @@ async def reports(m: Message):
 
 @router.message(F.text == "Настройки")
 async def settings_menu(m: Message):
-    url = url_join(str(settings.PUBLIC_BASE_URL), "/dashboard")
-    ikb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Открыть кабинет", url=url)]
-    ])
+    url = await build_login_url(m.from_user.id)
+    ikb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Открыть кабинет", url=url)]]
+    )
     await m.answer(
-        f"Зайди в кабинет: {url}\n(скоро добавим one-time вход)",
+        f"Зайди в кабинет: {url}\n(one-time ссылка, действует 10 минут)",
         reply_markup=ikb
     )
 

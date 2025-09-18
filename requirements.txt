@@ -14,3 +14,4 @@ pydantic-settings
 cryptography
 pynacl
 python-dotenv
+itsdangerous>=2.1
