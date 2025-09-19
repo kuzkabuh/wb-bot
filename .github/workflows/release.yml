@@ -1,0 +1,65 @@
+name: Release on tag
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  make-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure gh cli is available
+        run: gh --version
+
+      - name: Extract version
+        id: ver
+        run: |
+          # refs/tags/v0.8.3 -> v0.8.3
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Detected tag: ${GITHUB_REF_NAME}"
+
+      - name: Generate release notes from CHANGELOG.md
+        id: notes
+        env:
+          VERSION: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "Generating notes for ${VERSION}"
+
+          awk -v ver="${VERSION}" '
+            BEGIN { p=0 }
+            /^## \[/ {
+              if (p==1) { exit }
+            }
+            $0 ~ "^## \\[" ver "\\]" { p=1 }
+            p==1 { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md || true
+
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::warning::Section for ${VERSION} not found in CHANGELOG.md; falling back to whole file"
+            cp CHANGELOG.md RELEASE_NOTES.md
+          fi
+
+          echo "notes_file=RELEASE_NOTES.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            echo "Release ${VERSION} exists — updating notes"
+            gh release edit "${VERSION}" --title "${VERSION}" --notes-file RELEASE_NOTES.md
+          else
+            echo "Creating release ${VERSION}"
+            gh release create "${VERSION}" --title "${VERSION}" --notes-file RELEASE_NOTES.md
+          fi
