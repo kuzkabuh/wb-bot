@@ -1,3 +1,24 @@
+## [0.8.11] - 2025-09-20
+### Changed
+- Modified file: .gitignore
+Modified file: CHANGELOG.md
+Modified file: release_20250920011803.zip
+Modified file: release_20250920012145.zip
+Modified file: release_20250920012755.zip
+Modified file: scripts/auto_release.sh
+
+
+
+## [0.8.11] - 2025-09-20
+### Changed
+- Modified file: .gitignore
+Modified file: release_20250920011803.zip
+Modified file: release_20250920012145.zip
+Modified file: release_20250920012755.zip
+Modified file: scripts/auto_release.sh
+
+
+
 ## [0.8.10] - 2025-09-20
 ### Changed
 - Modified file: scripts/auto_release.sh

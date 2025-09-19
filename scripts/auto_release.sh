@@ -113,7 +113,20 @@ echo "CHANGELOG.md обновлён."
 git add "$changelog_file" .
 commit_body=""
 commit_body+="$added_entries$changed_entries$fixed_entries"
-git commit -m "chore(release): v$new_version\n\n$commit_body"
+commit_file="release_commit_message.txt"
+# Если файл с сообщением отсутствует или пуст, создаём его с предложенным
+# шаблоном и просим пользователя отредактировать его вручную, затем
+# повторно запустить скрипт.  Это позволяет задать осмысленный текст
+# коммита через интерфейс (например, через веб).
+if [[ ! -s "$commit_file" ]]; then
+  printf "chore(release): v$new_version\n\n%s" "$commit_body" > "$commit_file"
+  echo "Файл $commit_file с предложенным сообщением коммита создан."
+  echo "Отредактируйте этот файл и снова запустите скрипт для выполнения релиза."
+  exit 0
+fi
+commit_msg=$(cat "$commit_file")
+rm -f "$commit_file"
+git commit -m "$commit_msg"
 echo "Коммит создан."
 
 # Создаём аннотированный тег
