@@ -1,3 +1,16 @@
+## [0.8.15] - 2025-09-20
+### Changed
+- Modified file: CHANGELOG.md
+Modified file: Dockerfile
+
+
+
+## [0.8.15] - 2025-09-20
+### Changed
+- Modified file: Dockerfile
+
+
+
 ## [0.8.14] - 2025-09-20
 ### Changed
 - Modified file: CHANGELOG.md

@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Устанавливаем git и полезные утилиты без дополнительных рекомендаций,
 # затем очищаем списки пакетов, чтобы уменьшить размер образа.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git openssh-client curl \
     && git config --global user.name "Kuzka Seller Bot" \
     && git config --global user.email "admin@kuzkabuh.ru" \
     && rm -rf /var/lib/apt/lists/*
