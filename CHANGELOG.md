@@ -1,3 +1,10 @@
+## [0.8.9] - 2025-09-20
+### Changed
+- Modified file: scripts/auto_release.sh
+Modified file: release_20250920012755.zip
+
+
+
 ## [0.8.7] - 2025-09-20
 - feat: версия 0.8.7 – баланс и проверка токена внутри профиля
 
