@@ -16,6 +16,9 @@
       <form method="post" action="/logout">
         <button class="btn btn-outline-danger" type="submit">Выйти</button>
       </form>
+      {% if role == 'admin' or role == 'Админ' or role == 'administrator' %}
+        <a class="btn btn-success" href="/commit">Создать релиз</a>
+      {% endif %}
     </div>
     {% if error %}
       <div class="alert alert-warning">{{ error }}</div>

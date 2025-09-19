@@ -1,3 +1,24 @@
+## [0.8.12] - 2025-09-20
+### Changed
+- Modified file: CHANGELOG.md
+Modified file: app/bot/bot.py
+Modified file: app/main.py
+Modified file: app/web/templates/commit.html
+Modified file: app/web/templates/dashboard.html
+Modified file: scripts/auto_release.sh
+
+
+
+## [0.8.12] - 2025-09-20
+### Changed
+- Modified file: app/bot/bot.py
+Modified file: app/main.py
+Modified file: app/web/templates/dashboard.html
+Modified file: scripts/auto_release.sh
+Modified file: app/web/templates/commit.html
+
+
+
 ## [0.8.11] - 2025-09-20
 ### Changed
 - Modified file: .gitignore

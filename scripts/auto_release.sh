@@ -109,25 +109,40 @@ else
 fi
 echo "CHANGELOG.md обновлён."
 
-# Добавляем изменения в индекс и коммитим. Текст коммита включает все пункты из changelog
+
+# Добавляем изменения в индекс. Текст коммита включает все пункты из changelog.
 git add "$changelog_file" .
+
+# Собираем тело commit‑сообщения из списка изменений.
 commit_body=""
 commit_body+="$added_entries$changed_entries$fixed_entries"
-commit_file="release_commit_message.txt"
-# Если файл с сообщением отсутствует или пуст, создаём его с предложенным
-# шаблоном и просим пользователя отредактировать его вручную, затем
-# повторно запустить скрипт.  Это позволяет задать осмысленный текст
-# коммита через интерфейс (например, через веб).
-if [[ ! -s "$commit_file" ]]; then
-  printf "chore(release): v$new_version\n\n%s" "$commit_body" > "$commit_file"
-  echo "Файл $commit_file с предложенным сообщением коммита создан."
-  echo "Отредактируйте этот файл и снова запустите скрипт для выполнения релиза."
-  exit 0
+
+# Если передана переменная окружения RELEASE_COMMIT_MESSAGE, используем её как
+# текст коммита и пропускаем этап редактирования файла. Это позволяет
+# автоматизировать процесс (например, из Telegram или Web‑интерфейса).
+if [[ -n "${RELEASE_COMMIT_MESSAGE:-}" ]]; then
+  commit_msg="$RELEASE_COMMIT_MESSAGE"
+  # Удаляем файл черновика, если он существует, чтобы он не мешал в дальнейшем
+  commit_file="release_commit_message.txt"
+  rm -f "$commit_file"
+  git commit -m "$commit_msg"
+  echo "Коммит создан с сообщением из RELEASE_COMMIT_MESSAGE."
+else
+  # В противном случае создаём файл с предложенным сообщением и просим пользователя
+  # его отредактировать. После редактирования и повторного запуска скрипта
+  # файл будет прочитан и удалён.
+  commit_file="release_commit_message.txt"
+  if [[ ! -s "$commit_file" ]]; then
+    printf "chore(release): v$new_version\n\n%s" "$commit_body" > "$commit_file"
+    echo "Файл $commit_file с предложенным сообщением коммита создан."
+    echo "Отредактируйте этот файл и снова запустите скрипт для выполнения релиза."
+    exit 0
+  fi
+  commit_msg=$(cat "$commit_file")
+  rm -f "$commit_file"
+  git commit -m "$commit_msg"
+  echo "Коммит создан." 
 fi
-commit_msg=$(cat "$commit_file")
-rm -f "$commit_file"
-git commit -m "$commit_msg"
-echo "Коммит создан."
 
 # Создаём аннотированный тег
 git tag -a "v$new_version" -m "Release v$new_version"

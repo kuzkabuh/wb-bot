@@ -13,6 +13,8 @@ from app.integrations.wb import (
     get_nm_report_detail,
     WBError,
 )
+import subprocess
+import os
 import secrets
 import json
 
@@ -53,6 +55,76 @@ def build_profile_menu() -> 'aiogram.types.ReplyKeyboardMarkup':
     return kb.as_markup(resize_keyboard=True)
 
 
+def build_reports_menu() -> 'aiogram.types.ReplyKeyboardMarkup':
+    """Return a reply keyboard markup for the reports submenu.
+
+    The reports submenu groups together various analytical and planning
+    sections such as metrics, supply recommendations, sales funnel and
+    access to the dashboard.  A 'Назад' button allows the user to
+    return to the main menu.
+
+    Returns:
+        ReplyKeyboardMarkup: A keyboard with report-related actions.
+    """
+    kb = ReplyKeyboardBuilder()
+    kb.button(text="Метрики")
+    kb.button(text="Поставки")
+    kb.button(text="Воронка продаж")
+    kb.button(text="Дашборд")
+    kb.button(text="Назад")
+    # Arrange two rows of two and a final row for the back button
+    kb.adjust(2, 2, 1)
+    return kb.as_markup(resize_keyboard=True)
+
+
+@router.message(F.text == "Сделать релиз")
+async def start_release(m: Message) -> None:
+    """Initiate a new release (admin only).
+
+    When an admin invokes this command, the bot will run the release
+    script to generate a new changelog section and a commit draft.  It
+    then prompts the admin to send a commit message, which will be used
+    to complete the release.  Non‑admins are informed that the
+    operation is not permitted.
+    """
+    # Check the user role to ensure only administrators can create releases
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.tg_id == m.from_user.id).first()
+        if not user or not (
+            getattr(user, "is_admin", False)
+            or getattr(user, "role", "") == "admin"
+        ):
+            await m.answer("Извините, эта команда доступна только администратору.")
+            return
+    # Run the release script once to update changelog and prepare commit draft
+    # Determine repository root relative to this file (bot.py is at app/bot/bot.py)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    try:
+        result = subprocess.run(
+            ["bash", "scripts/auto_release.sh"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        err = e.stdout + "\n" + (e.stderr or "")
+        await m.answer(f"Ошибка при подготовке релиза:\n{err}")
+        return
+    except Exception as e:
+        await m.answer(f"Не удалось запустить скрипт релиза: {e}")
+        return
+    # Set a flag so the next message from this user will be treated as commit message
+    await redis.setex(f"commit:await:{m.from_user.id}", 600, "true")
+    await m.answer(
+        "Новый раздел changelog создан. Пожалуйста, отправьте сообщение,\n"
+        "которое будет использовано как commit‑message для релиза.\n"
+        "Например, кратко опишите изменения и добавьте дополнительные детали.\n"
+        "Команда будет ждать 10 минут.",
+    )
+
+
 async def build_login_url(tg_id: int) -> str:
     """Generate a one‑time login URL for the given Telegram ID.
 
@@ -75,17 +147,26 @@ async def start(m: Message) -> None:
     their WB API key is working.
     """
     kb = ReplyKeyboardBuilder()
-    # Build buttons
-    kb.button(text="Метрики")
-    kb.button(text="Поставки")
+    # Build main menu: group analytics under "Отчёты"
     kb.button(text="Отчёты")
     kb.button(text="Профиль")
     kb.button(text="Настройки")
-    kb.button(text="Воронка продаж")
-    # Убираем кнопку проверки токена из главного меню. Общие действия по пользователю
-    # будут доступны внутри профиля.
-    # Arrange buttons: two rows of two and two single buttons on their own rows
-    kb.adjust(2, 2, 1, 1)
+    # If the user is admin, show the release button
+    is_admin = False
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.tg_id == m.from_user.id).first()
+        if user and (
+            getattr(user, "is_admin", False)
+            or getattr(user, "role", "") == "admin"
+        ):
+            is_admin = True
+    if is_admin:
+        kb.button(text="Сделать релиз")
+        # Layout: three rows: two buttons on first, two on second, one on third
+        kb.adjust(2, 2, 1)
+    else:
+        # Main menu layout: one row of two and a final single button
+        kb.adjust(2, 1)
     await m.answer(
         "Привет! Я Kuzka Seller Bot.\nВыбирай раздел:",
         reply_markup=kb.as_markup(resize_keyboard=True),
@@ -95,13 +176,19 @@ async def start(m: Message) -> None:
 @router.message(F.text == "Метрики")
 async def metrics(m: Message) -> None:
     """Send placeholder metrics information."""
-    await m.answer("Дайджест: сегодня 0 продаж, выручка 0 ₽ (демо).")
+    await m.answer(
+        "Дайджест: сегодня 0 продаж, выручка 0 ₽ (демо).",
+        reply_markup=build_reports_menu(),
+    )
 
 
 @router.message(F.text == "Поставки")
 async def supplies(m: Message) -> None:
     """Send placeholder supply recommendations."""
-    await m.answer("Рекомендации по поставкам появятся после синхронизации (демо).")
+    await m.answer(
+        "Рекомендации по поставкам появятся после синхронизации (демо).",
+        reply_markup=build_reports_menu(),
+    )
 
 
 @router.message(F.text == "Отчёты")
@@ -203,6 +290,18 @@ async def profile(m: Message) -> None:
         parse_mode="HTML",
         disable_web_page_preview=True,
         reply_markup=build_profile_menu(),
+    )
+
+
+@router.message(F.text == "Отчёты")
+async def reports_menu(m: Message) -> None:
+    """Display the reports submenu.
+
+    Groups together metrics, supply planning, sales funnel and dashboard actions.
+    """
+    await m.answer(
+        "Раздел отчётов. Выберите подраздел:",
+        reply_markup=build_reports_menu(),
     )
 
 
@@ -464,7 +563,75 @@ async def sales_funnel_report(m: Message) -> None:
     if num > 3:
         lines.append("…")
     # Send the report
-    await m.answer("\n".join(lines))
+    await m.answer(
+        "\n".join(lines),
+        reply_markup=build_reports_menu(),
+    )
+
+
+# Handler for dashboard link inside reports submenu
+@router.message(F.text == "Дашборд")
+async def dashboard_link(m: Message) -> None:
+    """Send a link to the dashboard when selected from the reports menu."""
+    url = url_join(str(settings.PUBLIC_BASE_URL), "/dashboard")
+    await m.answer(
+        f"Сформируй отчёт в кабинете: {url}",
+        disable_web_page_preview=True,
+        reply_markup=build_reports_menu(),
+    )
+
+
+# Fallback echo handler: reply with the same text for any unhandled message
+@router.message()
+async def echo_all_messages(m: Message) -> None:
+    """Echo any user message back to them.
+
+    This handler is registered last so it only triggers if no other
+    command or filter matched.  It simply replies with the text
+    content of the incoming message, which can be useful for
+    debugging or when users send unexpected input.
+    """
+    # Choose the appropriate text: use text or caption if present
+    # Before echoing, check if the user is expected to provide a commit message.
+    pending_key = f"commit:await:{m.from_user.id}"
+    try:
+        pending = await redis.get(pending_key)
+    except Exception:
+        pending = None
+    # If pending flag exists, consume this message as a commit description
+    if pending:
+        # Remove the pending flag
+        await redis.delete(pending_key)
+        commit_msg = m.text or m.caption or ""
+        # Call the release script with the commit message passed via env var
+        # We run the script in the root of the project (assuming this file resides in app/bot/)
+        # Determine repository root relative to this file
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        env = os.environ.copy()
+        env["RELEASE_COMMIT_MESSAGE"] = commit_msg
+        try:
+            result = subprocess.run(
+                ["bash", "scripts/auto_release.sh"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                env=env,
+                check=True,
+            )
+            out = result.stdout.strip()
+            # Only show last 25 lines to avoid flooding
+            lines = out.splitlines()
+            tail = "\n".join(lines[-25:])
+            await m.answer(f"Релиз выполнен. Последние строки вывода:\n{tail}")
+        except subprocess.CalledProcessError as e:
+            err = e.stdout + "\n" + (e.stderr or "")
+            await m.answer(f"Ошибка при выполнении релиза:\n{err}")
+        except Exception as e:
+            await m.answer(f"Непредвиденная ошибка релиза: {e}")
+        return
+    # Otherwise, simply echo the message
+    content = m.text or m.caption or "(без текста)"
+    await m.answer(content)
 
 
 def build_bot() -> tuple[Bot, Dispatcher]:

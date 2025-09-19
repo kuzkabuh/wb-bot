@@ -42,6 +42,15 @@ def require_auth(request: Request) -> int:
     return int(request.session["tg_id"])
 
 
+# Utility to check whether a user is an admin.  Certain routes are protected
+# such that only admins may access them.  The User model is expected to have
+# either an ``is_admin`` boolean field or a ``role`` string set to "admin".
+def is_admin_user(user: User | None) -> bool:
+    if not user:
+        return False
+    return bool(getattr(user, "is_admin", False) or getattr(user, "role", "") == "admin")
+
+
 @app.get("/healthz")
 async def healthz_get():
     REQ_COUNTER.labels("/healthz").inc()
@@ -231,6 +240,103 @@ async def whoami(request: Request):
 async def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url="/", status_code=302)
+
+# -----------------------------------------------------------------------------
+# Commit management UI (admin only)
+
+@app.get("/commit", response_class=HTMLResponse)
+async def commit_get(request: Request, tg_id: int = Depends(require_auth)) -> HTMLResponse:
+    """Display a form for creating a new release commit (admin only).
+
+    This route renders a simple form where an administrator can enter a
+    commit message.  Upon submission, the backend will run the release
+    script with the provided message to create and push a new version.
+    """
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.tg_id == tg_id).first()
+        if not is_admin_user(user):
+            raise HTTPException(status_code=403, detail="forbidden")
+    return templates.TemplateResponse(
+        "commit.html",
+        {
+            "request": request,
+            "title": "Создать релиз",
+            "tg_id": tg_id,
+            "submitted": False,
+            "error": "",
+            "output": "",
+        },
+    )
+
+
+@app.post("/commit", response_class=HTMLResponse)
+async def commit_post(
+    request: Request,
+    message: str = Form(...),
+    tg_id: int = Depends(require_auth),
+) -> HTMLResponse:
+    """Process a commit request from the web form (admin only).
+
+    Runs the release script with the provided commit message.  On success,
+    renders the same template with a confirmation; on failure, displays
+    the error to the user.
+    """
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.tg_id == tg_id).first()
+        if not is_admin_user(user):
+            raise HTTPException(status_code=403, detail="forbidden")
+    # Run release script with commit message via environment variable
+    # Determine project root (main.py is in app/, so go up one level)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    env = os.environ.copy()
+    env["RELEASE_COMMIT_MESSAGE"] = message
+    try:
+        result = subprocess.run(
+            ["bash", "scripts/auto_release.sh"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        output = result.stdout.strip().splitlines()
+        tail = "\n".join(output[-20:])
+        return templates.TemplateResponse(
+            "commit.html",
+            {
+                "request": request,
+                "title": "Создать релиз",
+                "tg_id": tg_id,
+                "submitted": True,
+                "error": "",
+                "output": tail,
+            },
+        )
+    except subprocess.CalledProcessError as e:
+        err = (e.stdout or "") + "\n" + (e.stderr or "")
+        return templates.TemplateResponse(
+            "commit.html",
+            {
+                "request": request,
+                "title": "Создать релиз",
+                "tg_id": tg_id,
+                "submitted": True,
+                "error": err,
+                "output": "",
+            },
+        )
+    except Exception as e:
+        return templates.TemplateResponse(
+            "commit.html",
+            {
+                "request": request,
+                "title": "Создать релиз",
+                "tg_id": tg_id,
+                "submitted": True,
+                "error": str(e),
+                "output": "",
+            },
+        )
 
 
 # Telegram webhook endpoint
