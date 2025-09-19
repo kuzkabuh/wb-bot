@@ -11,6 +11,7 @@ from app.core.redis import redis
 from app.db.base import SessionLocal
 from app.db.models import User, UserCredentials
 from app.security.crypto import encrypt_value, decrypt_value
+from app.security.token_utils import sanitize_wb_token  # <- важный импорт
 import httpx
 
 # Prometheus
@@ -19,8 +20,12 @@ REQ_COUNTER = Counter("app_requests_total", "Total HTTP requests", ["endpoint"])
 
 setup_logging(settings.LOG_LEVEL)
 app = FastAPI(title="Kuzka Seller Bot")
-# cookie-сессии (секрет берём из мастер-ключа)
-app.add_middleware(SessionMiddleware, secret_key=settings.MASTER_ENCRYPTION_KEY.split("base64:")[-1])
+
+# cookie-сессии (секрет берём из мастер-ключа; SessionMiddleware ждёт строку)
+# если ключ в формате "base64:...." — берём хвост после префикса
+_session_secret = settings.MASTER_ENCRYPTION_KEY.split("base64:")[-1]
+app.add_middleware(SessionMiddleware, secret_key=_session_secret)
+
 templates = Jinja2Templates(directory="app/web/templates")
 bot, dp = build_bot()
 
@@ -47,8 +52,17 @@ async def login_tg(request: Request, token: str):
     REQ_COUNTER.labels("/login/tg").inc()
     key = f"login:ott:{token}"
 
-    # 1) атомарно берём и удаляем
-    tg_id = await redis.getdel(key)
+    # 1) атомарно берём и удаляем (getdel может отсутствовать в редких сборках клиента)
+    try:
+        tg_id = await redis.getdel(key)  # type: ignore[attr-defined]
+    except AttributeError:
+        # fallback через pipeline
+        async with redis.pipeline(transaction=True) as pipe:  # type: ignore[attr-defined]
+            await pipe.get(key)
+            await pipe.delete(key)
+            res = await pipe.execute()
+        tg_id = res[0] if res else None
+
     if not tg_id:
         # 2) «второй шанс» на повторный клик 60 сек
         tg_id = await redis.get(f"login:ott:recent:{token}")
@@ -90,14 +104,18 @@ async def dashboard(request: Request, tg_id: int = Depends(require_auth)):
             needs_key = True
         else:
             try:
-                token = decrypt_value(cred.wb_api_key_encrypted, cred.salt)
+                token = decrypt_value(
+                    cred.wb_api_key_encrypted,
+                    cred.salt,
+                    getattr(cred, "key_version", 1),
+                )
             except Exception:
                 error = "Не удалось расшифровать API-ключ. Сохраните его заново в настройках."
                 needs_key = True
                 token = None
 
             if token:
-                headers = {"Authorization": f"Bearer {token}"}
+                headers = {"Authorization": token}
                 async with httpx.AsyncClient(timeout=20) as client:
                     # seller-info
                     try:
@@ -156,13 +174,25 @@ async def settings_get(request: Request, tg_id: int = Depends(require_auth)):
 @app.post("/settings", response_class=HTMLResponse)
 async def settings_post(request: Request, wb_api_key: str = Form(""), tg_id: int = Depends(require_auth)):
     REQ_COUNTER.labels("/settings_post").inc()
-    if not wb_api_key.strip():
+
+    raw = (wb_api_key or "").strip()
+    if not raw:
         return templates.TemplateResponse(
             "settings.html",
             {"request": request, "title": "Настройки", "tg_id": tg_id, "has_key": False, "saved": False, "error": "Укажите API ключ."},
         )
 
-    token, salt = encrypt_value(wb_api_key.strip())
+    # Санитайз и валидация — должен быть ровно JWT без 'Bearer'
+    try:
+        clean_token = sanitize_wb_token(raw)
+    except ValueError as ve:
+        return templates.TemplateResponse(
+            "settings.html",
+            {"request": request, "title": "Настройки", "tg_id": tg_id, "has_key": False, "saved": False, "error": f"Некорректный токен: {ve}"},
+        )
+
+    # encrypt_value возвращает 3 значения: (ciphertext, salt_str, key_version)
+    ciphertext, salt_str, key_ver = encrypt_value(clean_token)
 
     with SessionLocal() as db:
         user = db.query(User).filter(User.tg_id == tg_id).first()
@@ -170,10 +200,16 @@ async def settings_post(request: Request, wb_api_key: str = Form(""), tg_id: int
             raise HTTPException(status_code=400, detail="user_not_found")
         cred = db.query(UserCredentials).filter_by(user_id=user.id).first()
         if cred:
-            cred.wb_api_key_encrypted = token
-            cred.salt = salt
+            cred.wb_api_key_encrypted = ciphertext
+            cred.salt = salt_str
+            cred.key_version = key_ver
         else:
-            cred = UserCredentials(user_id=user.id, wb_api_key_encrypted=token, salt=salt, key_version=1)
+            cred = UserCredentials(
+                user_id=user.id,
+                wb_api_key_encrypted=ciphertext,
+                salt=salt_str,
+                key_version=key_ver,
+            )
             db.add(cred)
         db.commit()
 
