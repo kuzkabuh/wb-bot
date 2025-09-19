@@ -11,10 +11,13 @@ from app.core.redis import redis
 from app.db.base import SessionLocal
 from app.db.models import User, UserCredentials
 from app.security.crypto import encrypt_value, decrypt_value
+from app.integrations.wb import get_seller_info, get_account_balance, ping_token, WBError
 import httpx
 
 # Prometheus
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, Counter
+
+# Counter to count requests per endpoint
 REQ_COUNTER = Counter("app_requests_total", "Total HTTP requests", ["endpoint"])
 
 setup_logging(settings.LOG_LEVEL)
@@ -25,7 +28,15 @@ templates = Jinja2Templates(directory="app/web/templates")
 bot, dp = build_bot()
 
 
-def require_auth(request: Request):
+def require_auth(request: Request) -> int:
+    """Dependency to ensure the user is authenticated.
+
+    Raises:
+        HTTPException: if the user is not authenticated.
+
+    Returns:
+        The Telegram ID of the authenticated user.
+    """
     if "tg_id" not in request.session:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return int(request.session["tg_id"])
@@ -90,38 +101,33 @@ async def dashboard(request: Request, tg_id: int = Depends(require_auth)):
             needs_key = True
         else:
             try:
-                token = decrypt_value(cred.wb_api_key_encrypted, cred.salt)
+                # decrypt_value extracts the plaintext and salt internally
+                token = decrypt_value(cred.wb_api_key_encrypted)
             except Exception:
                 error = "Не удалось расшифровать API-ключ. Сохраните его заново в настройках."
                 needs_key = True
                 token = None
 
             if token:
-                headers = {"Authorization": f"Bearer {token}"}
-                async with httpx.AsyncClient(timeout=20) as client:
-                    # seller-info
-                    try:
-                        r1 = await client.get("https://common-api.wildberries.ru/api/v1/seller-info", headers=headers)
-                        if r1.status_code == 200:
-                            seller = r1.json()
-                        else:
-                            error = f"WB seller-info: {r1.status_code} {r1.text[:200]}"
-                    except Exception as e:
-                        error = f"WB seller-info ошибка: {e!r}"
+                # При получении данных используем общие функции интеграции,
+                # чтобы не дублировать логику и правильно передавать заголовки.
+                try:
+                    seller = await get_seller_info(token)
+                except WBError as e:
+                    error = f"WB seller-info: {e}"
+                except Exception as e:
+                    error = f"WB seller-info ошибка: {e!r}"
 
-                    # balance
-                    try:
-                        r2 = await client.get("https://finance-api.wildberries.ru/api/v1/account/balance", headers=headers)
-                        if r2.status_code == 200:
-                            balance = r2.json()
-                        else:
-                            if error:
-                                error += " | "
-                            error += f"WB balance: {r2.status_code} {r2.text[:200]}"
-                    except Exception as e:
-                        if error:
-                            error += " | "
-                        error += f"WB balance ошибка: {e!r}"
+                try:
+                    balance = await get_account_balance(token)
+                except WBError as e:
+                    if error:
+                        error += " | "
+                    error += f"WB balance: {e}"
+                except Exception as e:
+                    if error:
+                        error += " | "
+                    error += f"WB balance ошибка: {e!r}"
 
     return templates.TemplateResponse(
         "dashboard.html",
@@ -149,17 +155,35 @@ async def settings_get(request: Request, tg_id: int = Depends(require_auth)):
             has_key = bool(cred)
     return templates.TemplateResponse(
         "settings.html",
-        {"request": request, "title": "Настройки", "tg_id": tg_id, "has_key": has_key, "saved": False, "error": ""},
+        {
+            "request": request,
+            "title": "Настройки",
+            "tg_id": tg_id,
+            "has_key": has_key,
+            "saved": False,
+            "error": "",
+        },
     )
 
 
 @app.post("/settings", response_class=HTMLResponse)
-async def settings_post(request: Request, wb_api_key: str = Form(""), tg_id: int = Depends(require_auth)):
+async def settings_post(
+    request: Request,
+    wb_api_key: str = Form(""),
+    tg_id: int = Depends(require_auth),
+) -> HTMLResponse:
     REQ_COUNTER.labels("/settings_post").inc()
     if not wb_api_key.strip():
         return templates.TemplateResponse(
             "settings.html",
-            {"request": request, "title": "Настройки", "tg_id": tg_id, "has_key": False, "saved": False, "error": "Укажите API ключ."},
+            {
+                "request": request,
+                "title": "Настройки",
+                "tg_id": tg_id,
+                "has_key": False,
+                "saved": False,
+                "error": "Укажите API ключ.",
+            },
         )
 
     token, salt = encrypt_value(wb_api_key.strip())
@@ -173,13 +197,25 @@ async def settings_post(request: Request, wb_api_key: str = Form(""), tg_id: int
             cred.wb_api_key_encrypted = token
             cred.salt = salt
         else:
-            cred = UserCredentials(user_id=user.id, wb_api_key_encrypted=token, salt=salt, key_version=1)
+            cred = UserCredentials(
+                user_id=user.id,
+                wb_api_key_encrypted=token,
+                salt=salt,
+                key_version=1,
+            )
             db.add(cred)
         db.commit()
 
     return templates.TemplateResponse(
         "settings.html",
-        {"request": request, "title": "Настройки", "tg_id": tg_id, "has_key": True, "saved": True, "error": ""},
+        {
+            "request": request,
+            "title": "Настройки",
+            "tg_id": tg_id,
+            "has_key": True,
+            "saved": True,
+            "error": "",
+        },
     )
 
 
@@ -232,3 +268,47 @@ async def set_webhook(req: Request):
 async def metrics():
     data = generate_latest()
     return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/check_token", response_class=HTMLResponse)
+async def check_token(
+    request: Request,
+    tg_id: int = Depends(require_auth),
+) -> HTMLResponse:
+    """Web view that checks the stored WB token against all endpoints.
+
+    Requires an authenticated session.  If the user has not saved a key,
+    an error message is displayed.  Otherwise it pings each configured
+    endpoint and shows the result.
+    """
+    REQ_COUNTER.labels("/check_token").inc()
+    error = ""
+    results: dict[str, str] = {}
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.tg_id == tg_id).first()
+        cred = None
+        if user:
+            cred = db.query(UserCredentials).filter_by(user_id=user.id).first()
+        if not cred:
+            error = "API‑ключ WB не найден. Добавьте его в настройках."
+        else:
+            try:
+                token = decrypt_value(cred.wb_api_key_encrypted)
+            except Exception:
+                error = "Не удалось расшифровать API‑ключ. Сохраните его заново."
+                token = None
+            if token:
+                try:
+                    results = await ping_token(token)
+                except Exception as e:
+                    error = f"Ошибка проверки токена: {e}"
+    return templates.TemplateResponse(
+        "check_token.html",
+        {
+            "request": request,
+            "title": "Проверка токена",
+            "tg_id": tg_id,
+            "results": results,
+            "error": error,
+        },
+    )
