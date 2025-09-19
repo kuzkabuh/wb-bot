@@ -7,7 +7,12 @@ from app.core.redis import redis
 from app.db.base import SessionLocal
 from app.db.models import User, UserCredentials
 from app.security.crypto import decrypt_value
-from app.integrations.wb import get_seller_info, get_account_balance, WBError
+from app.integrations.wb import (
+    get_seller_info,
+    get_account_balance,
+    get_nm_report_detail,
+    WBError,
+)
 import secrets
 import json
 
@@ -76,10 +81,11 @@ async def start(m: Message) -> None:
     kb.button(text="Отчёты")
     kb.button(text="Профиль")
     kb.button(text="Настройки")
+    kb.button(text="Воронка продаж")
     # Убираем кнопку проверки токена из главного меню. Общие действия по пользователю
     # будут доступны внутри профиля.
-    # Arrange buttons: two rows of two and a single button on the last row
-    kb.adjust(2, 2, 1)
+    # Arrange buttons: two rows of two and two single buttons on their own rows
+    kb.adjust(2, 2, 1, 1)
     await m.answer(
         "Привет! Я Kuzka Seller Bot.\nВыбирай раздел:",
         reply_markup=kb.as_markup(resize_keyboard=True),
@@ -355,6 +361,110 @@ async def go_back(m: Message) -> None:
     user's original message is ignored apart from its sender.
     """
     await start(m)
+
+
+# Handler for Sales Funnel report (Воронка продаж)
+@router.message(F.text == "Воронка продаж")
+async def sales_funnel_report(m: Message) -> None:
+    """Generate a sales funnel (product cards) report for the last 7 days.
+
+    This handler calls the Wildberries analytics API endpoint to build a
+    report of product card statistics (openCard, addToCart, orders, etc.).
+    The report covers the most recent 7‑day period and uses the user's
+    WB API token.  If no token is stored, the user is prompted to set
+    one first.  The result is summarized: we show how many product
+    cards are in the response and display the first few entries with
+    key metrics.  This endpoint may be rate‑limited, so we do not
+    cache its response.
+    """
+    from datetime import date, timedelta
+
+    # Retrieve user and token similar to other handlers
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.tg_id == m.from_user.id).first()
+        if not user:
+            login_url = await build_login_url(m.from_user.id)
+            ikb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Открыть кабинет", url=login_url)]]
+            )
+            return await m.answer(
+                "Сначала открой кабинет и сохраните API‑ключ WB.",
+                reply_markup=ikb,
+                disable_web_page_preview=True,
+            )
+        cred = db.query(UserCredentials).filter_by(user_id=user.id).first()
+        if not cred:
+            login_url = await build_login_url(m.from_user.id)
+            ikb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Сохранить API‑ключ", url=login_url)]]
+            )
+            return await m.answer(
+                "API‑ключ WB не найден. Добавьте его в настройках кабинета.",
+                reply_markup=ikb,
+                disable_web_page_preview=True,
+            )
+        try:
+            token = decrypt_value(cred.wb_api_key_encrypted)
+        except Exception:
+            login_url = await build_login_url(m.from_user.id)
+            ikb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Обновить API‑ключ", url=login_url)]]
+            )
+            return await m.answer(
+                "Не удалось расшифровать API‑ключ. Сохраните его заново.",
+                reply_markup=ikb,
+                disable_web_page_preview=True,
+            )
+
+    # Determine date range: last 7 days ending today (inclusive)
+    today = date.today()
+    start_date = today - timedelta(days=7)
+    period_begin = start_date.isoformat()
+    period_end = today.isoformat()
+    # Use the user's timezone if available; default to Europe/Amsterdam
+    tz = "Europe/Amsterdam"
+
+    # Call analytics API
+    try:
+        data = await get_nm_report_detail(
+            token,
+            period_begin,
+            period_end,
+            timezone=tz,
+            page=1,
+        )
+    except WBError as e:
+        return await m.answer(f"Ошибка аналитики: {e}")
+    except Exception as e:
+        return await m.answer(f"Не удалось получить отчёт: {e}")
+
+    # Assume the response is a list of items or has a key 'data' holding the list
+    items = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        # Some WB endpoints wrap results under 'data' or 'cardAnaliticsData'
+        for key in ["data", "cardAnaliticsData", "analyticsData", "cards"]:
+            if key in data and isinstance(data[key], list):
+                items = data[key]
+                break
+    num = len(items)
+
+    lines = [f"Воронка продаж за период {period_begin} – {period_end}"]
+    lines.append(f"Получено карточек: {num}")
+    # Show first 3 items if available
+    for item in items[:3]:
+        nm_id = item.get("nmId") or item.get("nmID") or item.get("article") or "?"
+        open_card = item.get("openCard") or item.get("open_card") or "?"
+        add_to_cart = item.get("addToCart") or item.get("add_to_cart") or "?"
+        orders = item.get("orders") or item.get("ordersCount") or "?"
+        lines.append(
+            f"{nm_id}: переходы={open_card}, добавления в корзину={add_to_cart}, заказы={orders}"
+        )
+    if num > 3:
+        lines.append("…")
+    # Send the report
+    await m.answer("\n".join(lines))
 
 
 def build_bot() -> tuple[Bot, Dispatcher]:
