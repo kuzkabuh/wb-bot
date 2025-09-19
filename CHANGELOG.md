@@ -1,3 +1,9 @@
+## [0.8.10] - 2025-09-20
+### Changed
+- Modified file: scripts/auto_release.sh
+
+
+
 ## [0.8.9] - 2025-09-20
 ### Changed
 - Modified file: scripts/auto_release.sh

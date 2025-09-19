@@ -24,10 +24,11 @@ fi
 
 # -----------------------------------------------------------------------------
 # Сборка архива проекта для отправки/резервного копирования
-# Используем git archive для создания zip‑архива текущего состояния HEAD.
-release_name="release_$(date +%Y%m%d%H%M%S).zip"
+# Мы создаём zip‑архив во временной директории, чтобы он не попадал в git.
+timestamp=$(date +%Y%m%d%H%M%S)
+release_name="/tmp/release_${timestamp}.zip"
 git archive --format=zip --output="$release_name" HEAD
-echo "Создан архив $release_name для отправки."
+echo "Создан архив $release_name для отправки (не будет добавлен в git)."
 
 # Определяем последний тег (в формате vX.Y.Z). Если тега нет — считаем 0.0.0.
 last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
