@@ -13,6 +13,27 @@
 
 ---
 
+## [0.3.0] - 2025-09-19
+### Added
+- `app/security/token_utils.py`: санитайзер WB-токена `sanitize_wb_token` (удаление Bearer/кавычек/невидимых символов, проверка формата JWT).
+
+### Changed
+- `app/security/crypto.py`: переработка шифрования/дешифрования с HKDF(v1) и солью; совместимость со старыми записями через fallback на master-ключ.
+- `app/main.py`:
+  - сохранение токена: теперь учитывает `encrypt_value` → **(ciphertext, salt, key_version)**,
+  - валидация токена через `sanitize_wb_token`,
+  - запросы к WB: **`Authorization: <token>`** (без `Bearer`), что соответствует требованию WB.
+- `app/bot/bot.py`: убран пустой `Command()` (ломал старт aiogram v3); обработка неизвестных команд через `F.text.startswith("/")` после конкретных хендлеров.
+
+### Fixed
+- 500 на `/settings` из-за распаковки двух значений из `encrypt_value` (теперь три).
+- Падение приложения при старте (`ValueError: At least one command should be specified`) из-за `Command()` без аргументов.
+- 401 от WB «token is malformed… could not base64 decode header…» — убран `Bearer` из заголовка.
+
+### Notes
+- Миграций БД нет.
+- Требуется переменная окружения `MASTER_ENCRYPTION_KEY` (urlsafe base64 для Fernet; допускается префикс `base64:`).
+
 ## [v0.8.3] - 2025-09-19
 ### Added
 - **Авторизация и регистрация через Telegram**: вход в кабинет по одноразовой ссылке (OTT) из бота, привязка сессии к `telegram_id`.
