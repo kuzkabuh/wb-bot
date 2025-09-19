@@ -28,6 +28,26 @@ def url_join(base: str, path: str) -> str:
     return base.rstrip("/") + "/" + path.lstrip("/")
 
 
+def build_profile_menu() -> 'aiogram.types.ReplyKeyboardMarkup':
+    """Return a reply keyboard markup for the profile submenu.
+
+    The submenu contains buttons related to the user's personal data.
+    Users can check their Wildberries balance, verify their token and
+    navigate back to the main menu.  All profile-related actions live
+    behind the "Профиль" button to keep the main menu concise.
+
+    Returns:
+        ReplyKeyboardMarkup: A keyboard with 'Баланс', 'Проверка токена' and 'Назад'.
+    """
+    kb = ReplyKeyboardBuilder()
+    kb.button(text="Баланс")
+    kb.button(text="Проверка токена")
+    kb.button(text="Назад")
+    # Two buttons on the first row (Balance and Check Token) and Back on its own row
+    kb.adjust(2, 1)
+    return kb.as_markup(resize_keyboard=True)
+
+
 async def build_login_url(tg_id: int) -> str:
     """Generate a one‑time login URL for the given Telegram ID.
 
@@ -56,9 +76,10 @@ async def start(m: Message) -> None:
     kb.button(text="Отчёты")
     kb.button(text="Профиль")
     kb.button(text="Настройки")
-    kb.button(text="Проверка токена")
-    # Arrange buttons into two rows of three
-    kb.adjust(3, 3)
+    # Убираем кнопку проверки токена из главного меню. Общие действия по пользователю
+    # будут доступны внутри профиля.
+    # Arrange buttons: two rows of two and a single button on the last row
+    kb.adjust(2, 2, 1)
     await m.answer(
         "Привет! Я Kuzka Seller Bot.\nВыбирай раздел:",
         reply_markup=kb.as_markup(resize_keyboard=True),
@@ -99,7 +120,16 @@ async def settings_menu(m: Message) -> None:
 
 @router.message(F.text == "Профиль")
 async def profile(m: Message) -> None:
-    """Display the seller profile and balance fetched from Wildberries."""
+    """Display basic seller information and present a profile submenu.
+
+    When the user selects the "Профиль" button from the main menu, we
+    fetch the seller's name and account ID from Wildberries (using
+    caching to respect API limits).  The response does *not* include
+    the balance; instead the balance can be retrieved on demand using
+    the 'Баланс' button.  We attach a profile submenu with actions
+    related to the user: check their balance, verify the API token
+    against Wildberries, or return to the main menu.
+    """
     # достаём пользователя и его WB API ключ
     with SessionLocal() as db:
         user = db.query(User).filter(User.tg_id == m.from_user.id).first()
@@ -140,9 +170,8 @@ async def profile(m: Message) -> None:
 
     # кэш от WB на 55 сек (лимиты)
     cache_info = f"wb:seller_info:{m.from_user.id}"
-    cache_bal = f"wb:balance:{m.from_user.id}"
-
     try:
+        # Try to use cached seller info to reduce API calls; if absent, fetch and cache
         raw = await redis.get(cache_info)
         seller_info = json.loads(raw) if raw else await get_seller_info(token)
         if not raw:
@@ -152,16 +181,7 @@ async def profile(m: Message) -> None:
     except Exception as e:
         return await m.answer(f"Ошибка seller-info: {e}")
 
-    try:
-        raw = await redis.get(cache_bal)
-        balance = json.loads(raw) if raw else await get_account_balance(token)
-        if not raw:
-            await redis.setex(cache_bal, 55, json.dumps(balance, ensure_ascii=False))
-    except WBError as e:
-        return await m.answer(f"Ошибка WB balance: {e}")
-    except Exception as e:
-        return await m.answer(f"Ошибка balance: {e}")
-
+    # Extract basic seller details
     name = seller_info.get("name") or seller_info.get("supplierName") or "—"
     acc_id = (
         seller_info.get("id")
@@ -169,19 +189,15 @@ async def profile(m: Message) -> None:
         or seller_info.get("supplierId")
         or "—"
     )
-    bal_value = (
-        balance.get("balance")
-        or balance.get("currentBalance")
-        or balance.get("total")
+
+    text = f"👤 Продавец: {name}\nID аккаунта: {acc_id}"
+    # Present seller info along with a submenu for balance and token check
+    await m.answer(
+        text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=build_profile_menu(),
     )
-
-    text = f"👤 Продавец: {name} \nID аккаунта: {acc_id} "
-    if isinstance(bal_value, (int, float, str)):
-        text += f"\n\n💰 Баланс: {bal_value} "
-    else:
-        text += f"\n\n💰 Баланс: формат не распознан (ключи: {', '.join(list(balance.keys())[:6])})"
-
-    await m.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message(F.text == "Проверка токена")
@@ -243,7 +259,102 @@ async def check_token_command(m: Message) -> None:
             lines.append(f"✅ {name}")
         else:
             lines.append(f"❌ {name}: {status}")
-    await m.answer("\n".join(lines))
+    # Send results with the profile submenu so the user can continue navigating
+    await m.answer(
+        "\n".join(lines),
+        reply_markup=build_profile_menu(),
+    )
+
+
+# new handler to display only the Wildberries balance
+@router.message(F.text == "Баланс")
+async def show_balance(m: Message) -> None:
+    """Handle the 'Баланс' command.
+
+    Fetches and displays the user's current balance from Wildberries.  If
+    the user has not stored a token, prompts them to set one.  The
+    response always includes the profile submenu so the user can check
+    the token again or return to the main menu.
+    """
+    # Retrieve user and token similar to the profile handler
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.tg_id == m.from_user.id).first()
+        if not user:
+            login_url = await build_login_url(m.from_user.id)
+            ikb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Открыть кабинет", url=login_url)]]
+            )
+            return await m.answer(
+                "Сначала открой кабинет и сохраните API‑ключ WB.",
+                reply_markup=ikb,
+                disable_web_page_preview=True,
+            )
+        cred = db.query(UserCredentials).filter_by(user_id=user.id).first()
+        if not cred:
+            login_url = await build_login_url(m.from_user.id)
+            ikb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Сохранить API‑ключ", url=login_url)]]
+            )
+            return await m.answer(
+                "API‑ключ WB не найден. Добавьте его в настройках кабинета.",
+                reply_markup=ikb,
+                disable_web_page_preview=True,
+            )
+        try:
+            token = decrypt_value(cred.wb_api_key_encrypted)
+        except Exception:
+            login_url = await build_login_url(m.from_user.id)
+            ikb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Обновить API‑ключ", url=login_url)]]
+            )
+            return await m.answer(
+                "Не удалось расшифровать API‑ключ. Сохраните его заново.",
+                reply_markup=ikb,
+                disable_web_page_preview=True,
+            )
+
+    # Attempt to fetch balance; use cache to reduce API calls
+    cache_bal = f"wb:balance:{m.from_user.id}"
+    try:
+        raw = await redis.get(cache_bal)
+        balance_data = json.loads(raw) if raw else await get_account_balance(token)
+        if not raw:
+            await redis.setex(cache_bal, 55, json.dumps(balance_data, ensure_ascii=False))
+    except WBError as e:
+        return await m.answer(
+            f"Ошибка WB balance: {e}", reply_markup=build_profile_menu()
+        )
+    except Exception as e:
+        return await m.answer(
+            f"Ошибка balance: {e}", reply_markup=build_profile_menu()
+        )
+
+    # Determine balance value field
+    bal_value = (
+        balance_data.get("balance")
+        or balance_data.get("currentBalance")
+        or balance_data.get("total")
+    )
+    if isinstance(bal_value, (int, float, str)):
+        text = f"💰 Баланс: {bal_value}"
+    else:
+        text = (
+            "💰 Баланс: формат не распознан (ключи: "
+            + ", ".join(list(balance_data.keys())[:6])
+            + ")"
+        )
+    await m.answer(text, reply_markup=build_profile_menu())
+
+
+# new handler to go back to the main menu from the profile submenu
+@router.message(F.text == "Назад")
+async def go_back(m: Message) -> None:
+    """Return the user to the main menu.
+
+    Simply calls the start handler to rebuild the main keyboard.  The
+    user's original message is ignored apart from its sender.
+    """
+    await start(m)
 
 
 def build_bot() -> tuple[Bot, Dispatcher]:
