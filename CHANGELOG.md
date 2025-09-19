@@ -1,3 +1,22 @@
+## [0.8.13] - 2025-09-20
+### Changed
+- Modified file: CHANGELOG.md
+Modified file: app/bot/bot.py
+Modified file: app/main.py
+Modified file: app/web/templates/settings.html
+Modified file: scripts/auto_release.sh
+
+
+
+## [0.8.13] - 2025-09-20
+### Changed
+- Modified file: app/bot/bot.py
+Modified file: app/main.py
+Modified file: app/web/templates/settings.html
+Modified file: scripts/auto_release.sh
+
+
+
 ## [0.8.12] - 2025-09-20
 ### Changed
 - Modified file: CHANGELOG.md

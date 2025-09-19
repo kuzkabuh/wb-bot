@@ -12,6 +12,12 @@
 
 set -euo pipefail
 
+# Ensure git is available
+if ! command -v git >/dev/null 2>&1; then
+  echo "git: command not found" >&2
+  exit 1
+fi
+
 # целевая ветка для пуша (основная ветка репозитория)
 target_branch="main"
 

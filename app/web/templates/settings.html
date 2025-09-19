@@ -11,6 +11,15 @@
   <div class="container" style="max-width:640px">
     <h1 class="mb-3">Настройки</h1>
     <p class="text-muted">Ваш Telegram ID: <b>{{ tg_id }}</b></p>
+    <div class="d-flex gap-2 mb-3">
+      <a class="btn btn-primary" href="/dashboard">Кабинет</a>
+      {% if role == 'admin' or role == 'Админ' or role == 'administrator' %}
+        <a class="btn btn-success" href="/commit">Создать релиз</a>
+      {% endif %}
+      <form method="post" action="/logout">
+        <button class="btn btn-outline-danger" type="submit">Выйти</button>
+      </form>
+    </div>
     {% if error %}
       <div class="alert alert-danger">{{ error }}</div>
     {% endif %}

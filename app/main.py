@@ -157,11 +157,13 @@ async def dashboard(request: Request, tg_id: int = Depends(require_auth)):
 async def settings_get(request: Request, tg_id: int = Depends(require_auth)):
     REQ_COUNTER.labels("/settings").inc()
     has_key = False
+    role = "user"
     with SessionLocal() as db:
         user = db.query(User).filter(User.tg_id == tg_id).first()
         if user:
             cred = db.query(UserCredentials).filter_by(user_id=user.id).first()
             has_key = bool(cred)
+            role = user.role
     return templates.TemplateResponse(
         "settings.html",
         {
@@ -171,6 +173,7 @@ async def settings_get(request: Request, tg_id: int = Depends(require_auth)):
             "has_key": has_key,
             "saved": False,
             "error": "",
+            "role": role,
         },
     )
 
@@ -183,6 +186,12 @@ async def settings_post(
 ) -> HTMLResponse:
     REQ_COUNTER.labels("/settings_post").inc()
     if not wb_api_key.strip():
+        # determine the user's role for the template
+        role = "user"
+        with SessionLocal() as db:
+            usr = db.query(User).filter(User.tg_id == tg_id).first()
+            if usr:
+                role = usr.role
         return templates.TemplateResponse(
             "settings.html",
             {
@@ -192,6 +201,7 @@ async def settings_post(
                 "has_key": False,
                 "saved": False,
                 "error": "Укажите API ключ.",
+                "role": role,
             },
         )
 
@@ -215,6 +225,12 @@ async def settings_post(
             db.add(cred)
         db.commit()
 
+    # Determine role again for template after saving
+    role_after = "user"
+    with SessionLocal() as db_role:
+        usr2 = db_role.query(User).filter(User.tg_id == tg_id).first()
+        if usr2:
+            role_after = usr2.role
     return templates.TemplateResponse(
         "settings.html",
         {
@@ -224,6 +240,7 @@ async def settings_post(
             "has_key": True,
             "saved": True,
             "error": "",
+            "role": role_after,
         },
     )
 

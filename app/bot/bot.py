@@ -17,6 +17,7 @@ import subprocess
 import os
 import secrets
 import json
+import time
 
 # Router instance for registering handlers
 router = Router()
@@ -48,10 +49,11 @@ def build_profile_menu() -> 'aiogram.types.ReplyKeyboardMarkup':
     """
     kb = ReplyKeyboardBuilder()
     kb.button(text="Баланс")
+    kb.button(text="Обновить баланс")
     kb.button(text="Проверка токена")
     kb.button(text="Назад")
-    # Two buttons on the first row (Balance and Check Token) and Back on its own row
-    kb.adjust(2, 1)
+    # Arrange two rows: Balance/Update, Check Token and Back in second row
+    kb.adjust(2, 2)
     return kb.as_markup(resize_keyboard=True)
 
 
@@ -125,6 +127,31 @@ async def start_release(m: Message) -> None:
     )
 
 
+# Handler to restart the bot (admin only)
+@router.message(F.text == "Перезапустить бота")
+async def restart_bot(m: Message) -> None:
+    """Restart the Telegram bot process.
+
+    Only administrators may invoke this command.  The bot will exit the
+    process after sending a confirmation message.  It relies on an
+    external process manager (systemd, supervisor, etc.) to restart it.
+    """
+    # Check admin
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.tg_id == m.from_user.id).first()
+        if not user or not (
+            getattr(user, "is_admin", False)
+            or getattr(user, "role", "") == "admin"
+        ):
+            await m.answer("Эта команда доступна только администратору.")
+            return
+    await m.answer("Бот будет перезапущен.")
+    # Give the message some time to be delivered
+    await m.bot.session.close()
+    # Exit the process; supervisor should restart it
+    os._exit(0)
+
+
 async def build_login_url(tg_id: int) -> str:
     """Generate a one‑time login URL for the given Telegram ID.
 
@@ -162,8 +189,9 @@ async def start(m: Message) -> None:
             is_admin = True
     if is_admin:
         kb.button(text="Сделать релиз")
-        # Layout: three rows: two buttons on first, two on second, one on third
-        kb.adjust(2, 2, 1)
+        kb.button(text="Перезапустить бота")
+        # Layout: two rows: two buttons on first row and two on second
+        kb.adjust(2, 2)
     else:
         # Main menu layout: one row of two and a final single button
         kb.adjust(2, 1)
@@ -418,22 +446,27 @@ async def show_balance(m: Message) -> None:
                 disable_web_page_preview=True,
             )
 
-    # Attempt to fetch balance; use cache to reduce API calls
-    cache_bal = f"wb:balance:{m.from_user.id}"
+    # Retrieve persistent balance from storage; do not call API here
+    persist_key = f"wb:balance:persist:{m.from_user.id}"
     try:
-        raw = await redis.get(cache_bal)
-        balance_data = json.loads(raw) if raw else await get_account_balance(token)
-        if not raw:
-            await redis.setex(cache_bal, 55, json.dumps(balance_data, ensure_ascii=False))
-    except WBError as e:
-        return await m.answer(
-            f"Ошибка WB balance: {e}", reply_markup=build_profile_menu()
+        raw = await redis.get(persist_key)
+    except Exception:
+        raw = None
+    if not raw:
+        # No stored balance
+        await m.answer(
+            "Баланс ещё не сохранён. Нажмите «Обновить баланс» для получения свежих данных.",
+            reply_markup=build_profile_menu(),
         )
-    except Exception as e:
-        return await m.answer(
-            f"Ошибка balance: {e}", reply_markup=build_profile_menu()
+        return
+    try:
+        balance_data = json.loads(raw)
+    except Exception:
+        await m.answer(
+            "Не удалось прочитать сохранённый баланс. Попробуйте обновить его.",
+            reply_markup=build_profile_menu(),
         )
-
+        return
     # Determine balance value field
     bal_value = (
         balance_data.get("balance")
@@ -449,6 +482,91 @@ async def show_balance(m: Message) -> None:
             + ")"
         )
     await m.answer(text, reply_markup=build_profile_menu())
+
+
+# Handler to update the user's stored balance (persistent) respecting rate limits
+@router.message(F.text == "Обновить баланс")
+async def update_balance_handler(m: Message) -> None:
+    """Update and store the user's balance in persistent storage.
+
+    Checks when the balance was last updated and ensures that updates do not
+    occur more frequently than once every 55 seconds (to respect API limits).
+    """
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.tg_id == m.from_user.id).first()
+        if not user:
+            login_url = await build_login_url(m.from_user.id)
+            ikb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Открыть кабинет", url=login_url)]]
+            )
+            return await m.answer(
+                "Сначала открой кабинет и сохраните API‑ключ WB.",
+                reply_markup=ikb,
+                disable_web_page_preview=True,
+            )
+        cred = db.query(UserCredentials).filter_by(user_id=user.id).first()
+        if not cred:
+            login_url = await build_login_url(m.from_user.id)
+            ikb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Сохранить API‑ключ", url=login_url)]]
+            )
+            return await m.answer(
+                "API‑ключ WB не найден. Добавьте его в настройках кабинета.",
+                reply_markup=ikb,
+                disable_web_page_preview=True,
+            )
+        try:
+            token = decrypt_value(cred.wb_api_key_encrypted)
+        except Exception:
+            login_url = await build_login_url(m.from_user.id)
+            ikb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Обновить API‑ключ", url=login_url)]]
+            )
+            return await m.answer(
+                "Не удалось расшифровать API‑ключ. Сохраните его заново.",
+                reply_markup=ikb,
+                disable_web_page_preview=True,
+            )
+    # Check last update timestamp
+    last_key = f"wb:balance:last:{m.from_user.id}"
+    persist_key = f"wb:balance:persist:{m.from_user.id}"
+    try:
+        last_raw = await redis.get(last_key)
+    except Exception:
+        last_raw = None
+    now_ts = int(time.time())
+    if last_raw:
+        try:
+            last_ts = int(last_raw)
+            if now_ts - last_ts < 55:
+                wait_sec = 55 - (now_ts - last_ts)
+                await m.answer(
+                    f"Баланс можно обновлять не чаще, чем раз в 55 секунд. Попробуйте через {wait_sec} с.",
+                    reply_markup=build_profile_menu(),
+                )
+                return
+        except Exception:
+            pass
+    # Fetch new balance from WB
+    try:
+        balance_data = await get_account_balance(token)
+    except WBError as e:
+        return await m.answer(
+            f"Ошибка WB balance: {e}", reply_markup=build_profile_menu()
+        )
+    except Exception as e:
+        return await m.answer(
+            f"Ошибка balance: {e}", reply_markup=build_profile_menu()
+        )
+    # Store persistently (in redis) with no expiry
+    try:
+        await redis.set(persist_key, json.dumps(balance_data, ensure_ascii=False))
+        await redis.set(last_key, str(now_ts))
+    except Exception:
+        pass
+    await m.answer(
+        "Баланс обновлён и сохранён.", reply_markup=build_profile_menu()
+    )
 
 
 # new handler to go back to the main menu from the profile submenu
