@@ -1,3 +1,28 @@
+## [0.8.14] - 2025-09-20
+### Changed
+- Modified file: CHANGELOG.md
+Modified file: Dockerfile
+Modified file: app/bot/bot.py
+Modified file: app/main.py
+Modified file: app/web/templates/base.html
+Modified file: app/web/templates/commit.html
+Modified file: app/web/templates/dashboard.html
+Modified file: app/web/templates/settings.html
+
+
+
+## [0.8.14] - 2025-09-20
+### Changed
+- Modified file: Dockerfile
+Modified file: app/bot/bot.py
+Modified file: app/main.py
+Modified file: app/web/templates/commit.html
+Modified file: app/web/templates/dashboard.html
+Modified file: app/web/templates/settings.html
+Modified file: app/web/templates/base.html
+
+
+
 ## [0.8.13] - 2025-09-20
 ### Changed
 - Modified file: CHANGELOG.md

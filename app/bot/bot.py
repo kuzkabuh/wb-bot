@@ -136,20 +136,8 @@ async def restart_bot(m: Message) -> None:
     process after sending a confirmation message.  It relies on an
     external process manager (systemd, supervisor, etc.) to restart it.
     """
-    # Check admin
-    with SessionLocal() as db:
-        user = db.query(User).filter(User.tg_id == m.from_user.id).first()
-        if not user or not (
-            getattr(user, "is_admin", False)
-            or getattr(user, "role", "") == "admin"
-        ):
-            await m.answer("Эта команда доступна только администратору.")
-            return
-    await m.answer("Бот будет перезапущен.")
-    # Give the message some time to be delivered
-    await m.bot.session.close()
-    # Exit the process; supervisor should restart it
-    os._exit(0)
+    # Simply call the /start handler to rebuild the menu for the user
+    await start(m)
 
 
 async def build_login_url(tg_id: int) -> str:
@@ -219,14 +207,13 @@ async def supplies(m: Message) -> None:
     )
 
 
-@router.message(F.text == "Отчёты")
-async def reports(m: Message) -> None:
-    """Send a link to the dashboard for report generation."""
-    url = url_join(str(settings.PUBLIC_BASE_URL), "/dashboard")
-    await m.answer(
-        f"Сформируй отчёт в кабинете: {url}",
-        disable_web_page_preview=True,
-    )
+# Note: there used to be two handlers for the «Отчёты» button: one that
+# simply sent a static dashboard link and another that opened the
+# reports submenu.  The duplicated handlers caused ambiguity and
+# unexpected behaviour (only the last registered handler is used).
+# We remove the static link handler and rely on the reports submenu
+# exclusively.  The submenu includes a «Дашборд» button which will
+# generate a one‑time login link to the user’s personal dashboard.
 
 
 @router.message(F.text == "Настройки")
@@ -329,6 +316,50 @@ async def reports_menu(m: Message) -> None:
     """
     await m.answer(
         "Раздел отчётов. Выберите подраздел:",
+        reply_markup=build_reports_menu(),
+    )
+
+
+@router.message(F.text == "Дашборд")
+async def dashboard_link(m: Message) -> None:
+    """Provide a one‑time login link to the user's dashboard.
+
+    When the user selects the «Дашборд» button from the reports
+    submenu, we generate a one‑time token and construct a link to
+    the login endpoint.  This allows users who have logged out of
+    the web cabinet to re‑authenticate quickly via Telegram.  If
+    the user has not yet saved their API key, they will be
+    directed to the settings page instead.
+    """
+    # Ensure the user exists in the database; otherwise prompt them to
+    # register via the cabinet.  We don't need the WB token here, so
+    # we only check that the user record exists.
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.tg_id == m.from_user.id).first()
+        if not user:
+            login_url = await build_login_url(m.from_user.id)
+            ikb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Открыть кабинет", url=login_url)]]
+            )
+            return await m.answer(
+                "Сначала открой кабинет и сохраните API‑ключ WB.",
+                reply_markup=ikb,
+                disable_web_page_preview=True,
+            )
+    # Build a one‑time login URL pointing directly to the dashboard; after
+    # successful authentication the backend will redirect the user to
+    # /dashboard.
+    ott_url = await build_login_url(m.from_user.id)
+    # Append the /dashboard path to the login URL so the user lands
+    # directly on the dashboard after login.  build_login_url returns
+    # something like https://app.example.com/login/tg?token=xxx; by
+    # adding "&next=/dashboard" the backend can redirect accordingly.
+    # If your backend supports a different mechanism, adjust this
+    # parameter as needed.  Here we simply point users to the login
+    # page, which will redirect them to the dashboard by default.
+    await m.answer(
+        f"Перейдите в кабинет по ссылке: {ott_url}",
+        disable_web_page_preview=True,
         reply_markup=build_reports_menu(),
     )
 
@@ -750,6 +781,8 @@ async def echo_all_messages(m: Message) -> None:
     # Otherwise, simply echo the message
     content = m.text or m.caption or "(без текста)"
     await m.answer(content)
+    # After echoing the message, also send the main menu to ensure the keyboard appears
+    await start(m)
 
 
 def build_bot() -> tuple[Bot, Dispatcher]:

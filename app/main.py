@@ -13,6 +13,7 @@ from app.db.models import User, UserCredentials
 from app.security.crypto import encrypt_value, decrypt_value
 from app.integrations.wb import get_seller_info, get_account_balance, ping_token, WBError
 import httpx
+import os
 
 # Prometheus
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, Counter
@@ -273,12 +274,14 @@ async def commit_get(request: Request, tg_id: int = Depends(require_auth)) -> HT
         user = db.query(User).filter(User.tg_id == tg_id).first()
         if not is_admin_user(user):
             raise HTTPException(status_code=403, detail="forbidden")
+    role = user.role
     return templates.TemplateResponse(
         "commit.html",
         {
             "request": request,
             "title": "Создать релиз",
             "tg_id": tg_id,
+            "role": role,
             "submitted": False,
             "error": "",
             "output": "",
@@ -324,6 +327,7 @@ async def commit_post(
                 "request": request,
                 "title": "Создать релиз",
                 "tg_id": tg_id,
+                "role": user.role,
                 "submitted": True,
                 "error": "",
                 "output": tail,
@@ -337,6 +341,7 @@ async def commit_post(
                 "request": request,
                 "title": "Создать релиз",
                 "tg_id": tg_id,
+                "role": user.role,
                 "submitted": True,
                 "error": err,
                 "output": "",
@@ -349,6 +354,7 @@ async def commit_post(
                 "request": request,
                 "title": "Создать релиз",
                 "tg_id": tg_id,
+                "role": user.role,
                 "submitted": True,
                 "error": str(e),
                 "output": "",
