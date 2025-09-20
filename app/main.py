@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Response, HTTPException, Depends, Form
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from aiogram.types import Update
@@ -11,9 +11,16 @@ from app.core.redis import redis
 from app.db.base import SessionLocal
 from app.db.models import User, UserCredentials
 from app.security.crypto import encrypt_value, decrypt_value
-from app.integrations.wb import get_seller_info, get_account_balance, ping_token, WBError
+from app.integrations.wb import (
+    get_seller_info,
+    get_account_balance,
+    ping_token,
+    WBError,
+)
+
 import httpx
 import os
+import subprocess  # <-- был отсутствующим импортом
 
 # Prometheus
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, Counter
@@ -21,37 +28,37 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, Counter
 # Counter to count requests per endpoint
 REQ_COUNTER = Counter("app_requests_total", "Total HTTP requests", ["endpoint"])
 
+# --- App bootstrap ---
 setup_logging(settings.LOG_LEVEL)
 app = FastAPI(title="Kuzka Seller Bot")
+
 # cookie-сессии (секрет берём из мастер-ключа)
-app.add_middleware(SessionMiddleware, secret_key=settings.MASTER_ENCRYPTION_KEY.split("base64:")[-1])
+# хранение sid в cookie, содержимое — серверная сессия Starlette
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.MASTER_ENCRYPTION_KEY.split("base64:")[-1],
+)
+
 templates = Jinja2Templates(directory="app/web/templates")
 bot, dp = build_bot()
 
 
+# --- Utils ---
 def require_auth(request: Request) -> int:
-    """Dependency to ensure the user is authenticated.
-
-    Raises:
-        HTTPException: if the user is not authenticated.
-
-    Returns:
-        The Telegram ID of the authenticated user.
-    """
+    """Ensure the user is authenticated and return tg_id."""
     if "tg_id" not in request.session:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return int(request.session["tg_id"])
 
 
-# Utility to check whether a user is an admin.  Certain routes are protected
-# such that only admins may access them.  The User model is expected to have
-# either an ``is_admin`` boolean field or a ``role`` string set to "admin".
 def is_admin_user(user: User | None) -> bool:
+    """Return True if user is admin by flag or role."""
     if not user:
         return False
     return bool(getattr(user, "is_admin", False) or getattr(user, "role", "") == "admin")
 
 
+# --- Health ---
 @app.get("/healthz")
 async def healthz_get():
     REQ_COUNTER.labels("/healthz").inc()
@@ -63,6 +70,15 @@ async def healthz_head():
     return Response(status_code=200)
 
 
+# --- Root (просто редирект на /dashboard или /settings) ---
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    if "tg_id" in request.session:
+        return RedirectResponse(url="/dashboard", status_code=302)
+    return RedirectResponse(url="/settings", status_code=302)
+
+
+# --- Auth: Telegram One-Time Token ---
 @app.get("/login/tg")
 async def login_tg(request: Request, token: str):
     REQ_COUNTER.labels("/login/tg").inc()
@@ -89,6 +105,7 @@ async def login_tg(request: Request, token: str):
     return RedirectResponse(url="/dashboard", status_code=302)
 
 
+# --- Dashboard ---
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request, tg_id: int = Depends(require_auth)):
     REQ_COUNTER.labels("/dashboard").inc()
@@ -103,41 +120,34 @@ async def dashboard(request: Request, tg_id: int = Depends(require_auth)):
         if user:
             role = user.role
 
-        cred = None
-        if user:
-            cred = db.query(UserCredentials).filter_by(user_id=user.id).first()
+        cred = db.query(UserCredentials).filter_by(user_id=user.id).first() if user else None
 
         if not cred:
             needs_key = True
+            token = None
         else:
             try:
-                # decrypt_value extracts the plaintext and salt internally
                 token = decrypt_value(cred.wb_api_key_encrypted)
             except Exception:
                 error = "Не удалось расшифровать API-ключ. Сохраните его заново в настройках."
                 needs_key = True
                 token = None
 
-            if token:
-                # При получении данных используем общие функции интеграции,
-                # чтобы не дублировать логику и правильно передавать заголовки.
-                try:
-                    seller = await get_seller_info(token)
-                except WBError as e:
-                    error = f"WB seller-info: {e}"
-                except Exception as e:
-                    error = f"WB seller-info ошибка: {e!r}"
+        if token:
+            # Пробуем получить профиль и баланс
+            try:
+                seller = await get_seller_info(token)
+            except WBError as e:
+                error = f"WB seller-info: {e}"
+            except Exception as e:
+                error = f"WB seller-info ошибка: {e!r}"
 
-                try:
-                    balance = await get_account_balance(token)
-                except WBError as e:
-                    if error:
-                        error += " | "
-                    error += f"WB balance: {e}"
-                except Exception as e:
-                    if error:
-                        error += " | "
-                    error += f"WB balance ошибка: {e!r}"
+            try:
+                balance = await get_account_balance(token)
+            except WBError as e:
+                error = f"{error + ' | ' if error else ''}WB balance: {e}"
+            except Exception as e:
+                error = f"{error + ' | ' if error else ''}WB balance ошибка: {e!r}"
 
     return templates.TemplateResponse(
         "dashboard.html",
@@ -154,6 +164,7 @@ async def dashboard(request: Request, tg_id: int = Depends(require_auth)):
     )
 
 
+# --- Settings (get/post) ---
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_get(request: Request, tg_id: int = Depends(require_auth)):
     REQ_COUNTER.labels("/settings").inc()
@@ -162,9 +173,10 @@ async def settings_get(request: Request, tg_id: int = Depends(require_auth)):
     with SessionLocal() as db:
         user = db.query(User).filter(User.tg_id == tg_id).first()
         if user:
+            role = user.role
             cred = db.query(UserCredentials).filter_by(user_id=user.id).first()
             has_key = bool(cred)
-            role = user.role
+
     return templates.TemplateResponse(
         "settings.html",
         {
@@ -186,7 +198,9 @@ async def settings_post(
     tg_id: int = Depends(require_auth),
 ) -> HTMLResponse:
     REQ_COUNTER.labels("/settings_post").inc()
-    if not wb_api_key.strip():
+    wb_api_key = wb_api_key.strip()
+
+    if not wb_api_key:
         # determine the user's role for the template
         role = "user"
         with SessionLocal() as db:
@@ -206,20 +220,21 @@ async def settings_post(
             },
         )
 
-    token, salt = encrypt_value(wb_api_key.strip())
+    token_enc, salt = encrypt_value(wb_api_key)
 
     with SessionLocal() as db:
         user = db.query(User).filter(User.tg_id == tg_id).first()
         if not user:
             raise HTTPException(status_code=400, detail="user_not_found")
+
         cred = db.query(UserCredentials).filter_by(user_id=user.id).first()
         if cred:
-            cred.wb_api_key_encrypted = token
+            cred.wb_api_key_encrypted = token_enc
             cred.salt = salt
         else:
             cred = UserCredentials(
                 user_id=user.id,
-                wb_api_key_encrypted=token,
+                wb_api_key_encrypted=token_enc,
                 salt=salt,
                 key_version=1,
             )
@@ -232,6 +247,7 @@ async def settings_post(
         usr2 = db_role.query(User).filter(User.tg_id == tg_id).first()
         if usr2:
             role_after = usr2.role
+
     return templates.TemplateResponse(
         "settings.html",
         {
@@ -246,6 +262,7 @@ async def settings_post(
     )
 
 
+# --- WhoAmI / Logout ---
 @app.get("/auth/whoami")
 async def whoami(request: Request):
     REQ_COUNTER.labels("/auth/whoami").inc()
@@ -259,22 +276,17 @@ async def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url="/", status_code=302)
 
-# -----------------------------------------------------------------------------
-# Commit management UI (admin only)
 
+# --- Commit management UI (admin only) ---
 @app.get("/commit", response_class=HTMLResponse)
 async def commit_get(request: Request, tg_id: int = Depends(require_auth)) -> HTMLResponse:
-    """Display a form for creating a new release commit (admin only).
-
-    This route renders a simple form where an administrator can enter a
-    commit message.  Upon submission, the backend will run the release
-    script with the provided message to create and push a new version.
-    """
+    """Form for creating a new release commit (admin only)."""
     with SessionLocal() as db:
         user = db.query(User).filter(User.tg_id == tg_id).first()
         if not is_admin_user(user):
             raise HTTPException(status_code=403, detail="forbidden")
-    role = user.role
+        role = user.role
+
     return templates.TemplateResponse(
         "commit.html",
         {
@@ -295,21 +307,16 @@ async def commit_post(
     message: str = Form(...),
     tg_id: int = Depends(require_auth),
 ) -> HTMLResponse:
-    """Process a commit request from the web form (admin only).
-
-    Runs the release script with the provided commit message.  On success,
-    renders the same template with a confirmation; on failure, displays
-    the error to the user.
-    """
+    """Run release script with provided commit message (admin only)."""
     with SessionLocal() as db:
         user = db.query(User).filter(User.tg_id == tg_id).first()
         if not is_admin_user(user):
             raise HTTPException(status_code=403, detail="forbidden")
-    # Run release script with commit message via environment variable
-    # Determine project root (main.py is in app/, so go up one level)
+
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     env = os.environ.copy()
     env["RELEASE_COMMIT_MESSAGE"] = message
+
     try:
         result = subprocess.run(
             ["bash", "scripts/auto_release.sh"],
@@ -319,7 +326,7 @@ async def commit_post(
             env=env,
             check=True,
         )
-        output = result.stdout.strip().splitlines()
+        output = (result.stdout or "").strip().splitlines()
         tail = "\n".join(output[-20:])
         return templates.TemplateResponse(
             "commit.html",
@@ -362,75 +369,82 @@ async def commit_post(
         )
 
 
-# Telegram webhook endpoint
+# --- Telegram webhook ---
 @app.post(settings.WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if not secret or secret != settings.TELEGRAM_WEBHOOK_SECRET:
         raise HTTPException(status_code=401, detail="bad secret")
+
+    # Валидация и прокорм апдейта aiogram
     payload = await request.json()
     update = Update.model_validate(payload)
     await dp.feed_update(bot, update)
     return Response(status_code=200)
 
 
-# Admin: set webhook (нормализуем URL)
+# --- Admin: set webhook (нормализуем URL) ---
 @app.post("/admin/set_webhook")
 async def set_webhook(req: Request):
     auth = req.headers.get("Authorization", "")
     if auth != f"Bearer {settings.ADMIN_TOKEN}":
         raise HTTPException(status_code=401, detail="unauthorized")
+
     base = str(settings.PUBLIC_BASE_URL).rstrip("/")
     path = settings.WEBHOOK_PATH.lstrip("/")
     url = f"{base}/{path}"
+
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.get(
             f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/setWebhook",
             params={"url": url, "secret_token": settings.TELEGRAM_WEBHOOK_SECRET},
         )
-        js = r.json()
-    return JSONResponse(js)
+        try:
+            js = r.json()
+        except Exception:
+            # Телеграм иногда отдаёт текст ошибки — вернём как есть
+            return PlainTextResponse(r.text, status_code=r.status_code)
+
+    return JSONResponse(js, status_code=r.status_code)
 
 
-# Prometheus metrics
+# --- Prometheus metrics ---
 @app.get("/metrics")
 async def metrics():
     data = generate_latest()
     return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
 
+# --- Web view: check token ---
 @app.get("/check_token", response_class=HTMLResponse)
-async def check_token(
+async def check_token_view(
     request: Request,
     tg_id: int = Depends(require_auth),
 ) -> HTMLResponse:
-    """Web view that checks the stored WB token against all endpoints.
-
-    Requires an authenticated session.  If the user has not saved a key,
-    an error message is displayed.  Otherwise it pings each configured
-    endpoint and shows the result.
-    """
+    """Check stored WB token against all endpoints (web page)."""
     REQ_COUNTER.labels("/check_token").inc()
     error = ""
     results: dict[str, str] = {}
+
     with SessionLocal() as db:
         user = db.query(User).filter(User.tg_id == tg_id).first()
-        cred = None
-        if user:
-            cred = db.query(UserCredentials).filter_by(user_id=user.id).first()
+        cred = db.query(UserCredentials).filter_by(user_id=user.id).first() if user else None
+
         if not cred:
-            error = "API‑ключ WB не найден. Добавьте его в настройках."
+            error = "API-ключ WB не найден. Добавьте его в настройках."
         else:
             try:
                 token = decrypt_value(cred.wb_api_key_encrypted)
             except Exception:
-                error = "Не удалось расшифровать API‑ключ. Сохраните его заново."
+                error = "Не удалось расшифровать API-ключ. Сохраните его заново."
                 token = None
+
             if token:
                 try:
                     results = await ping_token(token)
                 except Exception as e:
                     error = f"Ошибка проверки токена: {e}"
+
     return templates.TemplateResponse(
         "check_token.html",
         {

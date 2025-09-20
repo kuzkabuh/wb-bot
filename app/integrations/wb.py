@@ -1,8 +1,18 @@
+# app/integrations/wb.py
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from decimal import Decimal, InvalidOperation
+from typing import Any, Dict, Mapping, Optional
+
 import httpx
+
+log = logging.getLogger("wb.integrations")
 
 COMMON_API = "https://common-api.wildberries.ru"
 FINANCE_API = "https://finance-api.wildberries.ru"
-
 # Base URL for seller analytics API (функции аналитики)
 ANALYTICS_API = "https://seller-analytics-api.wildberries.ru"
 
@@ -12,88 +22,146 @@ class WBError(Exception):
     pass
 
 
-async def _get(url: str, token: str) -> dict:
-    """Send a GET request to the given URL with the provided token.
-
-    Args:
-        url: The full URL of the endpoint to query.
-        token: The API token without the ``Bearer `` prefix.
-
-    Returns:
-        The parsed JSON response as a dictionary.
-
-    Raises:
-        WBError: If the status code indicates an error or if rate limits are hit.
+async def _request(
+    method: str,
+    url: str,
+    token: str,
+    *,
+    json_body: Optional[Mapping[str, Any]] = None,
+    timeout: float = 20.0,
+) -> Dict[str, Any]:
+    """
+    Unified HTTP request helper with robust error and JSON handling.
+    - Authorization header WITHOUT 'Bearer' (как у WB).
+    - Friendly errors for 401/429.
+    - Parses JSON and supports optional {'data': {...}} envelopes.
     """
     headers = {
-        # Для WB обычно без "Bearer"
-        "Authorization": token,
+        "Authorization": token,   # В WB обычно без "Bearer"
         "Accept": "application/json",
     }
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(url, headers=headers)
-    if r.status_code == 401:
-        raise WBError("401 Unauthorized (проверьте API-ключ)")
-    if r.status_code == 429:
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.request(method.upper(), url, headers=headers, json=json_body)
+
+    status = r.status_code
+    text = r.text
+
+    if status == 401:
+        raise WBError("401 Unauthorized (проверьте API-ключ и права)")
+    if status == 429:
         raise WBError("429 Too Many Requests (лимит WB, попробуйте позже)")
-    if r.status_code >= 400:
-        raise WBError(f"{r.status_code} {r.text}")
-    return r.json()
+    if status >= 400:
+        raise WBError(f"{status} {text}")
+
+    # JSON parsing with graceful degradation
+    try:
+        data = r.json()  # type: ignore[no-redef]
+    except json.JSONDecodeError as e:
+        # Иногда WB может вернуть пустой ответ/HTML при инцидентах
+        raise WBError(f"Некорректный JSON от WB: {e}; payload: {text[:500]}")
+
+    # Иногда API заворачивает полезную нагрузку в {"data": {...}}
+    if isinstance(data, dict) and "data" in data and isinstance(data["data"], dict):
+        return data["data"]  # type: ignore[return-value]
+    if isinstance(data, dict):
+        return data
+    raise WBError(f"Неожиданная структура ответа WB: {type(data).__name__}")
 
 
-async def get_seller_info(token: str) -> dict:
-    """Return seller info from the common API.
+async def _get(url: str, token: str) -> Dict[str, Any]:
+    return await _request("GET", url, token)
 
-    Args:
-        token: Wildberries API token without the Bearer prefix.
 
-    Returns:
-        A dict representing seller information.
+async def _post(url: str, token: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    return await _request("POST", url, token, json_body=payload)
+
+
+# -------- Common API
+
+async def get_seller_info(token: str) -> Dict[str, Any]:
     """
-    return await _get(f"{COMMON_API}/api/v1/seller-info", token)
-
-
-async def get_account_balance(token: str) -> dict:
-    """Return account balance information from the finance API.
-
-    Args:
-        token: Wildberries API token without the Bearer prefix.
-
-    Returns:
-        A dict representing account balance.
+    Seller info from the Common API.
     """
-    return await _get(f"{FINANCE_API}/api/v1/account/balance", token)
+    url = f"{COMMON_API}/api/v1/seller-info"
+    return await _get(url, token)
 
 
-async def ping_token(token: str) -> dict:
-    """Ping the configured WB endpoints with the provided token.
+# -------- Finance API
 
-    The function calls every available WB integration endpoint and records
-    whether the call succeeded or raised an exception.  The return value
-    maps human‑readable endpoint names to either the string ``"ok"`` or
-    the error message returned by the underlying request.
-
-    Args:
-        token: Wildberries API token.
-
-    Returns:
-        A mapping from endpoint name to ``"ok"`` or an error string.
+def _to_decimal(value: Any) -> Decimal:
     """
-    results: dict[str, str] = {}
+    Convert value to Decimal safely (supports int/float/str).
+    """
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise WBError(f"Не удалось привести значение к числу: {value!r}")
+
+
+def _normalize_balance_payload(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    WB обычно отвечает полями: currency, current, for_withdraw.
+    Но на всякий случай поддержим 'forWithdraw' и числовые строки.
+    """
+    # допускаем альтернативный кейс поля:
+    currency = raw.get("currency")
+    current = raw.get("current")
+    for_withdraw = raw.get("for_withdraw", raw.get("forWithdraw"))
+
+    if currency is None or current is None or for_withdraw is None:
+        # Подсветим, какие ключи получили
+        keys = ", ".join(sorted(map(str, raw.keys())))
+        raise WBError(
+            f"Формат баланса не распознан. Нужны ключи: currency, current, for_withdraw; "
+            f"получены: {keys or '(пусто)'}"
+        )
+
+    return {
+        "currency": str(currency),
+        "current": _to_decimal(current),
+        "for_withdraw": _to_decimal(for_withdraw),
+    }
+
+
+async def get_account_balance(token: str) -> Dict[str, Any]:
+    """
+    Account balance from the Finance API.
+    Возвращает нормализованный dict: {currency:str, current:Decimal, for_withdraw:Decimal}
+    """
+    url = f"{FINANCE_API}/api/v1/account/balance"
+    raw = await _get(url, token)
+    # Лог для отладки (можно выключить в проде)
+    log.info("WB Finance raw payload: %s", json.dumps(raw, ensure_ascii=False)[:1000])
+    return _normalize_balance_payload(raw)
+
+
+# -------- Diagnostics
+
+async def ping_token(token: str) -> Dict[str, str]:
+    """
+    Прозвон основных эндпоинтов с данным токеном.
+    Возвращает {endpoint: "ok" | "error text"}.
+    """
+    results: Dict[str, str] = {}
     endpoints = {
         "seller-info": get_seller_info,
         "account-balance": get_account_balance,
     }
     for name, func in endpoints.items():
         try:
-            # we ignore the returned data, only care whether call succeeds
-            await func(token)
+            await func(token)  # результат нам не важен, главное — успешность
             results[name] = "ok"
         except Exception as e:
-            # record the exception string so the caller can render it
             results[name] = str(e)
     return results
 
+
+# -------- Seller Analytics API
 
 async def get_nm_report_detail(
     token: str,
@@ -102,41 +170,18 @@ async def get_nm_report_detail(
     *,
     timezone: str = "Europe/Moscow",
     page: int = 1,
-    brand_names: list[str] | None = None,
-    object_ids: list[int] | None = None,
-    tag_ids: list[int] | None = None,
-    nm_ids: list[int] | None = None,
-    order_by: dict | None = None,
-) -> dict:
-    """Request the product cards funnel report for the given period.
-
-    This function calls the Wildberries seller analytics endpoint
-    ``/api/v2/nm-report/detail`` which returns a list of product
-    statistics (open card, add to cart, orders, etc.) for the
-    specified period.  If no filters are provided, all product cards
-    for the seller are included.  The period must not exceed the
-    last 365 days.
-
-    Args:
-        token: API key for the Analytics category (without ``Bearer``).
-        period_begin: Start date in ISO format (YYYY-MM-DD).
-        period_end: End date in ISO format (YYYY-MM-DD).
-        timezone: IANA time zone name; defaults to ``Europe/Moscow``.
-        page: Page number for pagination.
-        brand_names: Optional list of brand names to filter.
-        object_ids: Optional list of object IDs to filter.
-        tag_ids: Optional list of tag IDs to filter.
-        nm_ids: Optional list of article numbers (nmIDs) to filter.
-        order_by: Optional ordering specification, e.g. ``{"field": "openCard", "sort": "desc"}``.
-
-    Returns:
-        Parsed JSON response as a Python dict.
-
-    Raises:
-        WBError: On HTTP errors or non-200 status codes.
+    brand_names: Optional[list[str]] = None,
+    object_ids: Optional[list[int]] = None,
+    tag_ids: Optional[list[int]] = None,
+    nm_ids: Optional[list[int]] = None,
+    order_by: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """
+    Запрос витрины аналитики карточек товаров за период.
+    Ограничение WB: не более 365 дней.
     """
     url = f"{ANALYTICS_API}/api/v2/nm-report/detail"
-    payload = {
+    payload: Dict[str, Any] = {
         "brandNames": brand_names or [],
         "objectIDs": object_ids or [],
         "tagIDs": tag_ids or [],
@@ -146,17 +191,5 @@ async def get_nm_report_detail(
         "orderBy": order_by or {"field": "openCard", "sort": "desc"},
         "page": page,
     }
-    headers = {
-        "Authorization": token,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(url, json=payload, headers=headers)
-    if r.status_code == 401:
-        raise WBError("401 Unauthorized (проверьте Analytics API-ключ)")
-    if r.status_code == 429:
-        raise WBError("429 Too Many Requests (лимит аналитики WB, попробуйте позже)")
-    if r.status_code >= 400:
-        raise WBError(f"{r.status_code} {r.text}")
-    return r.json()
+    raw = await _post(url, token, payload)
+    return raw

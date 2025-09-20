@@ -1,3 +1,24 @@
+## [0.8.16] - 2025-09-20
+### Changed
+- Modified file: CHANGELOG.md
+Modified file: Dockerfile
+Modified file: app/bot/bot.py
+Modified file: app/db/models.py
+Modified file: app/integrations/wb.py
+Modified file: app/main.py
+
+
+
+## [0.8.16] - 2025-09-20
+### Changed
+- Modified file: Dockerfile
+Modified file: app/bot/bot.py
+Modified file: app/db/models.py
+Modified file: app/integrations/wb.py
+Modified file: app/main.py
+
+
+
 ## [0.8.15] - 2025-09-20
 ### Changed
 - Modified file: CHANGELOG.md
