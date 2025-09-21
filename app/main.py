@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import re
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
 
 import httpx
 from aiogram.types import Update
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, Query
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
@@ -20,7 +19,13 @@ from app.core.logging import setup_logging
 from app.core.redis import redis
 from app.db.base import SessionLocal
 from app.db.models import User, UserCredentials
-from app.integrations.wb import WBError, get_account_balance, get_seller_info, ping_token
+from app.integrations.wb import (
+    WBError,
+    get_account_balance,
+    get_seller_info,
+    ping_token,
+    get_supplier_sales,   # ⬅️ добавлено: статистика продаж
+)
 from app.security.crypto import decrypt_value, encrypt_value
 
 # -----------------------------------------------------------------------------
@@ -52,11 +57,9 @@ import datetime as _dt  # noqa: E402
 def json_pretty(value) -> Markup:
     def _default(o):
         if isinstance(o, _decimal.Decimal):
-            # Можно вернуть str(o), если важно сохранить точность как текст
             return float(o)
         if isinstance(o, (_dt.datetime, _dt.date)):
             return o.isoformat()
-        # безопасный фолбэк
         return str(o)
 
     return Markup(_json.dumps(value, ensure_ascii=False, indent=2, default=_default))
@@ -64,7 +67,6 @@ def json_pretty(value) -> Markup:
 
 templates.env.filters["json_pretty"] = json_pretty
 # -----------------------------------------------------------------------------
-
 
 bot, dp = build_bot()
 
@@ -447,13 +449,17 @@ async def telegram_webhook(request: Request):
 
 
 # -----------------------------------------------------------------------------
-# Admin: set webhook (нормализуем URL)
+# Admin: webhook helpers (set / delete / info)
 # -----------------------------------------------------------------------------
-@app.post("/admin/set_webhook")
-async def set_webhook(req: Request):
+def _require_admin(req: Request):
     auth = req.headers.get("Authorization", "")
     if auth != f"Bearer {settings.ADMIN_TOKEN}":
         raise HTTPException(status_code=401, detail="unauthorized")
+
+
+@app.post("/admin/set_webhook")
+async def set_webhook(req: Request):
+    _require_admin(req)
 
     base = str(settings.PUBLIC_BASE_URL).rstrip("/")
     path = settings.WEBHOOK_PATH.lstrip("/")
@@ -468,7 +474,35 @@ async def set_webhook(req: Request):
             js = r.json()
             return JSONResponse(js, status_code=r.status_code)
         except Exception:
-            # Телеграм иногда может вернуть текст — отдадим как есть
+            return PlainTextResponse(r.text, status_code=r.status_code)
+
+
+@app.post("/admin/delete_webhook")
+async def delete_webhook(req: Request):
+    _require_admin(req)
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(
+            f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/deleteWebhook",
+            params={"drop_pending_updates": "false"},
+        )
+        try:
+            js = r.json()
+            return JSONResponse(js, status_code=r.status_code)
+        except Exception:
+            return PlainTextResponse(r.text, status_code=r.status_code)
+
+
+@app.get("/admin/get_webhook_info")
+async def get_webhook_info(req: Request):
+    _require_admin(req)
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(
+            f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+        )
+        try:
+            js = r.json()
+            return JSONResponse(js, status_code=r.status_code)
+        except Exception:
             return PlainTextResponse(r.text, status_code=r.status_code)
 
 
@@ -521,3 +555,105 @@ async def check_token_view(
             "error": error,
         },
     )
+
+
+# -----------------------------------------------------------------------------
+# Web view: Sales preview (Statistics API)
+# -----------------------------------------------------------------------------
+_SALES_TABLE_HEAD = """
+<style>
+table.sales{border-collapse:collapse;margin-top:12px;font:14px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif}
+table.sales th, table.sales td{border:1px solid #ddd;padding:6px 8px;vertical-align:top}
+table.sales th{background:#f6f6f6;position:sticky;top:0}
+code.small{font-size:12px;color:#4b5563}
+.formbox{padding:12px;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa}
+</style>
+<h1>Отчёт «Продажи»</h1>
+<div class="formbox">
+  <form method="get" action="/reports/sales">
+    <label>date_from (RFC3339 или YYYY-MM-DD):
+      <input type="text" name="date_from" value="{date_from}" style="width:260px;margin-left:6px"/>
+    </label>
+    &nbsp;&nbsp;
+    <label>flag:
+      <select name="flag">
+        <option value="0" {f0}>0 (с &gt;= lastChangeDate)</option>
+        <option value="1" {f1}>1 (вся дата = date_from)</option>
+      </select>
+    </label>
+    &nbsp;&nbsp;
+    <button type="submit">Показать</button>
+  </form>
+  <p><code class="small">Подсказка: для выгрузки всего объёма итеративно используйте поле <b>lastChangeDate</b> из последней строки.</code></p>
+</div>
+"""
+
+@app.get("/reports/sales", response_class=HTMLResponse)
+async def sales_preview(
+    request: Request,
+    tg_id: int = Depends(require_auth),
+    date_from: Optional[str] = Query(None, alias="date_from"),
+    flag: int = Query(0, ge=0, le=1),
+    limit: int = Query(100, ge=1, le=500),
+) -> HTMLResponse:
+    """
+    Быстрый предпросмотр Statistics API: /api/v1/supplier/sales
+    Показываем первые N строк (limit), без сохранения файла.
+    """
+    REQ_COUNTER.labels("/reports/sales").inc()
+
+    # sane default: сегодня по Мск
+    if not date_from:
+        date_from = _dt.date.today().isoformat()
+
+    html_parts: List[str] = [
+        _SALES_TABLE_HEAD.format(date_from=date_from, f0="selected" if flag == 0 else "", f1="selected" if flag == 1 else "")
+    ]
+
+    error = ""
+    rows: List[Dict[str, Any]] = []
+
+    with SessionLocal() as db:
+        user, creds = _get_user_and_creds(db, tg_id)
+        if not user or not creds:
+            error = "API-ключ WB не найден. Добавьте его в настройках."
+        else:
+            token = _safe_decrypt(creds.wb_api_key_encrypted)
+            if not token:
+                error = "Не удалось расшифровать API-ключ. Сохраните его заново."
+            else:
+                try:
+                    data = await get_supplier_sales(token, date_from=date_from, flag=flag)
+                    if isinstance(data, list):
+                        rows = data[:limit]
+                    else:
+                        rows = []
+                except WBError as e:
+                    error = f"Ошибка WB Statistics: {e}"
+                except Exception as e:
+                    error = f"Ошибка запроса: {e!r}"
+
+    if error:
+        html_parts.append(f'<p style="color:#b91c1c">⚠️ {error}</p>')
+    else:
+        html_parts.append(f"<p>Строк: всего ≈ {len(rows)} (показаны первые {min(limit, len(rows))})</p>")
+        # Выведем компактную таблицу ключевых полей
+        cols = [
+            "date", "lastChangeDate", "warehouseName", "regionName",
+            "supplierArticle", "nmId", "techSize",
+            "totalPrice", "discountPercent", "forPay", "finishedPrice",
+            "saleID", "gNumber", "srid",
+        ]
+        head = "<tr>" + "".join(f"<th>{c}</th>" for c in cols) + "</tr>"
+        body_rows = []
+        for r in rows:
+            tds = []
+            for c in cols:
+                v = r.get(c, "")
+                tds.append(f"<td>{v}</td>")
+            body_rows.append("<tr>" + "".join(tds) + "</tr>")
+        table = f'<table class="sales"><thead>{head}</thead><tbody>{"".join(body_rows)}</tbody></table>'
+        html_parts.append(table)
+
+    html = "\n".join(html_parts)
+    return HTMLResponse(content=html)

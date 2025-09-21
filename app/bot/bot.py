@@ -1,4 +1,3 @@
-# app/bot/bot.py
 from __future__ import annotations
 
 import os
@@ -108,8 +107,9 @@ def build_reports_api_menu() -> ReplyKeyboardMarkup:
     kb.button(text="Доля бренда в продажах")
     kb.button(text="Скрытые товары")
     kb.button(text="Возвраты и перемещения")
+    kb.button(text="Продажи")  # ← добавили отчёт о продажах
     kb.button(text="Назад к отчётам")
-    kb.adjust(2, 2, 2, 2, 2)
+    kb.adjust(2, 2, 2, 2, 2)  # раскладка; лишние кнопки просто перейдут на новую строку
     return kb.as_markup(resize_keyboard=True)
 
 
@@ -689,7 +689,8 @@ async def _call_report(func_name: str, token: str, **kwargs) -> Any:
     func = getattr(wb_integration, func_name, None)
     if not callable(func):
         raise WBError(f"Интеграция не реализована: {func_name}")
-    return await func(**kwargs)
+    # ВАЖНО: прокидываем token внутрь интеграции
+    return await func(token=token, **kwargs)
 
 
 def _preview_table(rows: List[Dict[str, Any]], keys_priority: List[str], limit: int = 10) -> List[str]:
@@ -959,6 +960,62 @@ async def report_returns_transfers(m: Message) -> None:
     await m.answer("\n".join(lines), reply_markup=build_reports_api_menu())
 
 
+# --------- Продажи (Statistics API)
+@router.message(F.text == "Продажи")
+async def report_sales(m: Message) -> None:
+    # ограничим частоту — это отдельный API, но тоже не стоит долбить часто
+    if not await _analytics_rate_limit(m):
+        return
+
+    user, token, ikb = await _require_user_and_token(m)
+    if not token:
+        return await m.answer("Нужен API-ключ для отчётов (категория Statistics).", reply_markup=ikb, disable_web_page_preview=True)
+
+    # По умолчанию: последние 7 дней целиком, флаг=1 (полная выгрузка за дату)
+    begin, end = _period_last_days(7)
+    try:
+        rows_any = await _call_report("get_report_sales", token=token, date_begin=begin, date_end=end, flag=1)
+    except WBError as e:
+        return await m.answer(f"Ошибка отчёта Продажи: {e}", reply_markup=build_reports_api_menu())
+    except Exception as e:
+        return await m.answer(f"Не удалось получить отчёт Продажи: {e}", reply_markup=build_reports_api_menu())
+
+    rows: List[Dict[str, Any]] = rows_any if isinstance(rows_any, list) else []
+    # агрегаты
+    sales = [r for r in rows if str(r.get("saleID", "")).startswith("S")]
+    returns = [r for r in rows if str(r.get("saleID", "")).startswith("R")]
+
+    sum_finished = sum(float(r.get("finishedPrice") or 0) for r in sales)
+    sum_forpay = sum(float(r.get("forPay") or 0) for r in sales)
+
+    lines = [
+        f"🧾 Продажи за {begin}–{end}:",
+        f"Строк всего: {_fmt_int(len(rows))}",
+        f"Продаж: {_fmt_int(len(sales))}; Возвратов: {_fmt_int(len(returns))}",
+        f"Фактическая сумма (finishedPrice): {_fmt_money(sum_finished)} ₽",
+        f"К перечислению (forPay): {_fmt_money(sum_forpay)} ₽",
+    ]
+    preview = _preview_table(
+        rows,
+        [
+            "date",
+            "supplierArticle",
+            "nmID", "nmId",
+            "subject", "brand",
+            "techSize", "size",
+            "finishedPrice", "forPay",
+            "warehouseName",
+            "saleID",
+        ],
+        limit=10,
+    )
+    if preview:
+        lines.append("Примеры строк:")
+        lines.extend(["• " + p for p in preview])
+
+    await m.answer("\n".join(lines), reply_markup=build_reports_api_menu())
+
+
 @router.message(F.text == "Назад к отчётам")
 async def back_to_reports(m: Message) -> None:
     await reports_menu(m)
@@ -1124,7 +1181,7 @@ async def show_balance(m: Message) -> None:
         return
 
     total, available, currency = _pick_balance_fields(balance_data)
-    if total is None and available is None:
+    if total is None & available is None:
         keys_preview = ", ".join(list(balance_data.keys())[:6])
         return await m.answer(f"💰 Баланс: формат не распознан (ключи: {keys_preview}).", reply_markup=build_profile_menu())
 
