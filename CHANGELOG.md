@@ -1,3 +1,18 @@
+## [0.8.18] - 2025-09-21
+### Changed
+- Modified file: CHANGELOG.md
+Modified file: app/bot/bot.py
+Modified file: app/integrations/wb.py
+
+
+
+## [0.8.18] - 2025-09-21
+### Changed
+- Modified file: app/bot/bot.py
+Modified file: app/integrations/wb.py
+
+
+
 ## [0.8.17] - 2025-09-21
 ### Changed
 - Modified file: CHANGELOG.md
