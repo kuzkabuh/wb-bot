@@ -1,36 +1,95 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <title>{{ title }}</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <link rel="stylesheet"
-        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"/>
-</head>
-<body class="p-4">
-  <div class="container" style="max-width:640px">
-    <h1 class="mb-3">Проверка токена</h1>
-    <p class="text-muted">Ваш Telegram ID: <b>{{ tg_id }}</b></p>
-    {% if error %}
-      <div class="alert alert-danger">{{ error }}</div>
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="mb-0">Проверка токена</h4>
+    <div class="text-muted small">Telegram ID: <b>{{ tg_id }}</b></div>
+  </div>
+
+  {% if error %}
+    <div class="alert alert-danger" role="alert">{{ error }}</div>
+  {% else %}
+    {% set items = results | dictsort %}
+    {% set ns = namespace(ok=0, bad=0, total=0) %}
+    {% for k, v in items %}
+      {% set ns.total = ns.total + 1 %}
+      {% if v is string %}
+        {% if v | lower | trim == 'ok' %}
+          {% set ns.ok = ns.ok + 1 %}
+        {% else %}
+          {% set ns.bad = ns.bad + 1 %}
+        {% endif %}
+      {% else %}
+        {% if v.ok is defined and v.ok %}
+          {% set ns.ok = ns.ok + 1 %}
+        {% else %}
+          {% set ns.bad = ns.bad + 1 %}
+        {% endif %}
+      {% endif %}
+    {% endfor %}
+
+    <div class="row g-3 mb-2">
+      <div class="col-auto">
+        <span class="badge bg-secondary">Всего: {{ ns.total }}</span>
+      </div>
+      <div class="col-auto">
+        <span class="badge bg-success">OK: {{ ns.ok }}</span>
+      </div>
+      <div class="col-auto">
+        <span class="badge bg-danger">Ошибки: {{ ns.bad }}</span>
+      </div>
+    </div>
+
+    {% if items|length == 0 %}
+      <div class="alert alert-warning">Результатов нет. Обновите страницу или повторите позже.</div>
     {% else %}
       <ul class="list-group mb-3">
-        {% for name, status in results.items() %}
-          <li class="list-group-item d-flex justify-content-between align-items-center">
-            <span>{{ name }}</span>
-            {% if status == "ok" %}
-              <span class="badge bg-success">OK</span>
-            {% else %}
-              <span class="badge bg-danger">{{ status }}</span>
+        {% for name, data in items %}
+          {% set is_simple = data is string %}
+          {% set ok = (data | lower | trim == 'ok') if is_simple else (data.ok if data.ok is defined else false) %}
+          {% set code = (none if is_simple else (data.code if data.code is defined else (data.status if data.status is defined else none))) %}
+          {% set ms = (none if is_simple else (data.ms if data.ms is defined else (data.latency if data.latency is defined else (data.latency_ms if data.latency_ms is defined else none)))) %}
+          {% set msg = (none if is_simple else (data.error if data.error is defined else (data.message if data.message is defined else (data.detail if data.detail is defined else none)))) %}
+          {% set simple_text = (data if is_simple else '') %}
+
+          <li class="list-group-item">
+            <div class="d-flex justify-content-between align-items-center">
+              <div class="me-3">
+                <div class="fw-semibold">{{ name }}</div>
+                <div class="small text-muted">
+                  {% if code is not none %}HTTP {{ code }}{% endif %}
+                  {% if code is not none and ms is not none %} · {% endif %}
+                  {% if ms is not none %}{{ ms }} ms{% endif %}
+                </div>
+              </div>
+              {% if ok %}
+                <span class="badge bg-success">OK</span>
+              {% else %}
+                {% if is_simple %}
+                  <span class="badge bg-danger">{{ simple_text }}</span>
+                {% else %}
+                  <span class="badge bg-danger">{{ (msg or 'FAIL') | truncate(48, True) }}</span>
+                {% endif %}
+              {% endif %}
+            </div>
+
+            {% if not ok %}
+              <details class="mt-2">
+                <summary class="text-muted small">Показать детали</summary>
+                <pre class="mt-2 small bg-light border rounded p-2">
+{{ (data if not is_simple else {'status': data}) | json_pretty }}
+                </pre>
+              </details>
             {% endif %}
           </li>
         {% endfor %}
       </ul>
     {% endif %}
-    <div class="d-flex gap-2">
-      <a class="btn btn-secondary" href="/dashboard">Назад</a>
-      <a class="btn btn-primary" href="/settings">Настройки</a>
-    </div>
+  {% endif %}
+
+  <div class="d-flex gap-2">
+    <a class="btn btn-secondary" href="/dashboard">Назад</a>
+    <a class="btn btn-outline-primary" href="/check_token">Обновить</a>
+    <a class="btn btn-primary" href="/settings">Настройки</a>
   </div>
-</body>
-</html>
+{% endblock %}

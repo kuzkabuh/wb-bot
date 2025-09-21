@@ -1,3 +1,30 @@
+## [0.8.17] - 2025-09-21
+### Changed
+- Modified file: CHANGELOG.md
+Modified file: app/bot/bot.py
+Modified file: app/integrations/wb.py
+Modified file: app/main.py
+Modified file: app/web/templates/base.html
+Modified file: app/web/templates/check_token.html
+Modified file: app/web/templates/commit.html
+Modified file: app/web/templates/dashboard.html
+Modified file: app/web/templates/settings.html
+
+
+
+## [0.8.17] - 2025-09-21
+### Changed
+- Modified file: app/bot/bot.py
+Modified file: app/integrations/wb.py
+Modified file: app/main.py
+Modified file: app/web/templates/base.html
+Modified file: app/web/templates/check_token.html
+Modified file: app/web/templates/commit.html
+Modified file: app/web/templates/dashboard.html
+Modified file: app/web/templates/settings.html
+
+
+
 ## [0.8.16] - 2025-09-20
 ### Changed
 - Modified file: CHANGELOG.md

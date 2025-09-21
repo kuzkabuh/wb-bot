@@ -1,24 +1,71 @@
 {% extends "base.html" %}
 
 {% block content %}
-  {% if error %}
-    <div class="alert alert-danger" role="alert" style="white-space:pre-wrap;">{{ error }}</div>
-  {% endif %}
-  {% if submitted %}
-    <div class="alert alert-success" role="alert">Релиз успешно создан.</div>
-    {% if output %}
-      <h5>Вывод скрипта:</h5>
-      <pre class="bg-light p-3 border" style="white-space:pre-wrap;">{{ output }}</pre>
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="mb-0">Создать релиз</h4>
+    {% if role %}
+      <span class="badge bg-dark text-uppercase">{{ role }}</span>
     {% endif %}
-    <a class="btn btn-secondary mt-3" href="/dashboard">Вернуться</a>
+  </div>
+
+  {# --- Состояния и алерты --- #}
+  {% if submitted and not error %}
+    <div class="alert alert-success" role="alert">
+      Релиз успешно создан.
+    </div>
+    {% if output %}
+      <h6 class="mt-3">Вывод скрипта</h6>
+      <pre class="bg-light p-3 border rounded small" style="white-space:pre-wrap; max-height:360px; overflow:auto;">{{ output | e }}</pre>
+    {% endif %}
+    <div class="mt-3 d-flex gap-2">
+      <a class="btn btn-secondary" href="/dashboard">Вернуться</a>
+      <a class="btn btn-outline-primary" href="/commit">Создать ещё</a>
+    </div>
+
+  {% elif submitted and error %}
+    <div class="alert alert-danger" role="alert" style="white-space:pre-wrap;">
+      <strong>Ошибка при создании релиза.</strong>
+      <div class="mt-2">{{ error }}</div>
+    </div>
+    {% if output %}
+      <details class="mt-2">
+        <summary class="text-muted small">Показать вывод скрипта</summary>
+        <pre class="bg-light p-3 border rounded small mt-2" style="white-space:pre-wrap; max-height:360px; overflow:auto;">{{ output | e }}</pre>
+      </details>
+    {% endif %}
+    <div class="mt-3 d-flex gap-2">
+      <a class="btn btn-secondary" href="/dashboard">Вернуться</a>
+      <a class="btn btn-outline-primary" href="/commit">Попробовать снова</a>
+    </div>
+
   {% else %}
+    {# --- Форма отправки --- #}
     <form method="post" class="mb-4">
+      {# Если позже добавишь CSRF — просто пробрось csrf_token в контекст #}
+      {% if csrf_token %}
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% endif %}
+
       <div class="mb-3">
         <label for="msg" class="form-label">Сообщение коммита</label>
-        <textarea id="msg" name="message" class="form-control" rows="8" required></textarea>
-        <div class="form-text">Опишите изменения, которые войдут в релиз. Этот текст станет commit‑message.</div>
+        <textarea id="msg"
+                  name="message"
+                  class="form-control"
+                  rows="8"
+                  minlength="3"
+                  required
+                  placeholder="Например: 
+- Исправлен расчёт баланса в dashboard
+- Добавлена проверка токена /check_token
+- Релиз 0.8.5">
+        </textarea>
+        <div class="form-text">
+          Этот текст станет commit-message для скрипта <code>scripts/auto_release.sh</code>.
+        </div>
       </div>
+
       <button type="submit" class="btn btn-success">Создать релиз</button>
+      <a class="btn btn-link" href="/dashboard">Отмена</a>
     </form>
   {% endif %}
 {% endblock %}

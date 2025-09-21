@@ -1,50 +1,128 @@
 {% extends "base.html" %}
 
 {% block content %}
-    {% if error %}
-      <div class="alert alert-warning">{{ error }}</div>
-    {% endif %}
-    {% if needs_key %}
-      <div class="alert alert-info">
-        Для отображения данных WB сохраните API-ключ в настройках.
-        <a href="/settings" class="btn btn-sm btn-primary ms-2">Открыть настройки</a>
-      </div>
-    {% else %}
-      <div class="row g-3">
-        <div class="col-md-6">
-          <div class="card shadow-sm">
-            <div class="card-body">
-              <h5 class="card-title mb-3">Профиль продавца (WB)</h5>
-              {% if seller %}
-                <div><b>Наименование:</b> {{ seller.name }}</div>
-                <div><b>SID:</b> <code>{{ seller.sid }}</code></div>
-                {% if seller.tradeMark %}
-                  <div><b>Торговая марка:</b> {{ seller.tradeMark }}</div>
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="mb-0">Кабинет</h4>
+    <div class="d-flex gap-2">
+      <a href="/check_token" class="btn btn-outline-secondary btn-sm">Проверка токена</a>
+      <a href="/dashboard" class="btn btn-outline-primary btn-sm">Обновить</a>
+    </div>
+  </div>
+
+  {% if error %}
+    <div class="alert alert-warning" role="alert">{{ error }}</div>
+  {% endif %}
+
+  {% if needs_key %}
+    <div class="alert alert-info" role="alert">
+      Для отображения данных WB сохраните API-ключ в настройках.
+      <a href="/settings" class="btn btn-sm btn-primary ms-2">Открыть настройки</a>
+    </div>
+  {% else %}
+    <div class="row g-3">
+      <!-- Seller card -->
+      <div class="col-md-6">
+        <div class="card shadow-sm h-100">
+          <div class="card-body">
+            <h5 class="card-title mb-3">Профиль продавца (WB)</h5>
+
+            {% if seller %}
+              {# Безопасные фолбэки по ключам: не используем "or", чтобы не съесть ноль #}
+              {% set seller_name = seller.name if seller.name is defined else (seller.supplierName if seller.supplierName is defined else '') %}
+              {% set seller_sid  = (seller.sid if seller.sid is defined
+                                    else (seller.supplierId if seller.supplierId is defined
+                                      else (seller.id if seller.id is defined else ''))) %}
+              {% set tm         = seller.tradeMark if seller.tradeMark is defined else (seller.brand if seller.brand is defined else '') %}
+              {% set inn        = seller.inn if seller.inn is defined else '' %}
+              {% set ogrn       = seller.ogrn if seller.ogrn is defined else '' %}
+
+              <dl class="row mb-0">
+                <dt class="col-sm-5">Наименование:</dt>
+                <dd class="col-sm-7">{{ seller_name or '—' }}</dd>
+
+                <dt class="col-sm-5">SID / SupplierID:</dt>
+                <dd class="col-sm-7"><code>{{ seller_sid or '—' }}</code></dd>
+
+                {% if tm %}
+                  <dt class="col-sm-5">Торговая марка:</dt>
+                  <dd class="col-sm-7">{{ tm }}</dd>
                 {% endif %}
-              {% else %}
-                <div class="text-muted">Нет данных по продавцу.</div>
-              {% endif %}
-            </div>
+
+                {% if inn %}
+                  <dt class="col-sm-5">ИНН:</dt>
+                  <dd class="col-sm-7">{{ inn }}</dd>
+                {% endif %}
+
+                {% if ogrn %}
+                  <dt class="col-sm-5">ОГРН:</dt>
+                  <dd class="col-sm-7">{{ ogrn }}</dd>
+                {% endif %}
+              </dl>
+
+              <details class="mt-3">
+                <summary class="text-muted">Показать сырой ответ</summary>
+                <pre class="mt-2 small bg-light p-2 border rounded">{{ seller  | json_pretty }}</pre>
+              </details>
+            {% else %}
+              <div class="text-muted">Нет данных по продавцу.</div>
+            {% endif %}
           </div>
         </div>
-        <div class="col-md-6">
-          <div class="card shadow-sm">
-            <div class="card-body">
-              <h5 class="card-title mb-3">Баланс (WB)</h5>
-              {% if balance %}
-                {# Выводим общую информацию по балансу: всего/активные/доступные к выводу. #}
-                {% set total = balance.balance or balance.currentBalance or balance.total %}
-                {% set avail = balance.forWithdraw or balance.available or balance.forWithdrawPresent %}
-                <div><b>Всего:</b> {{ total }}</div>
-                {% if avail %}
-                  <div><b>Доступно к выводу:</b> {{ avail }}</div>
-                {% endif %}
-              {% else %}
-                <div class="text-muted">Нет данных по балансу.</div>
+      </div>
+
+      <!-- Balance card -->
+      <div class="col-md-6">
+        <div class="card shadow-sm h-100">
+          <div class="card-body">
+            <h5 class="card-title mb-3">Баланс (WB)</h5>
+
+            {% if balance %}
+              {# Правильный выбор ключа без потери нуля #}
+              {% set total = none %}
+              {% if balance.balance is defined %}{% set total = balance.balance %}
+              {% elif balance.currentBalance is defined %}{% set total = balance.currentBalance %}
+              {% elif balance.total is defined %}{% set total = balance.total %}
               {% endif %}
-            </div>
+
+              {% set avail = none %}
+              {% if balance.forWithdraw is defined %}{% set avail = balance.forWithdraw %}
+              {% elif balance.available is defined %}{% set avail = balance.available %}
+              {% elif balance.forWithdrawPresent is defined %}{% set avail = balance.forWithdrawPresent %}
+              {% endif %}
+
+              {% set frozen = none %}
+              {% if balance.frozen is defined %}{% set frozen = balance.frozen %}
+              {% elif balance.blocked is defined %}{% set frozen = balance.blocked %}
+              {% endif %}
+
+              <dl class="row mb-0">
+                <dt class="col-sm-6">Всего:</dt>
+                <dd class="col-sm-6">{{ total if total is not none else '—' }}</dd>
+
+                <dt class="col-sm-6">Доступно к выводу:</dt>
+                <dd class="col-sm-6">{{ avail if avail is not none else '—' }}</dd>
+
+                {% if frozen is not none %}
+                  <dt class="col-sm-6">Заморожено / блокировано:</dt>
+                  <dd class="col-sm-6">{{ frozen }}</dd>
+                {% endif %}
+
+                {% if balance.updatedAt is defined %}
+                  <dt class="col-sm-6">Обновлено:</dt>
+                  <dd class="col-sm-6"><span class="text-muted">{{ balance.updatedAt }}</span></dd>
+                {% endif %}
+              </dl>
+
+              <details class="mt-3">
+                <summary class="text-muted">Показать сырой ответ</summary>
+                <pre class="mt-2 small bg-light p-2 border rounded">{{ balance | json_pretty }}</pre>
+              </details>
+            {% else %}
+              <div class="text-muted">Нет данных по балансу.</div>
+            {% endif %}
           </div>
         </div>
       </div>
-    {% endif %}
+    </div>
+  {% endif %}
 {% endblock %}
